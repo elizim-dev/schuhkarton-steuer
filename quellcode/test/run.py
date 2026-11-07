@@ -12,7 +12,7 @@ shutil.copy(os.path.join(ROOT, "test", "mock-graph.js"), os.path.join(T, "src", 
 subprocess.run(["npx", "esbuild", os.path.join(T, "src", "main.js"), "--bundle", "--format=iife",
                 "--outfile=" + os.path.join(T, "app.js"), "--log-level=warning"], check=True, cwd=ROOT)
 with open(os.path.join(T, "index.html")) as fh:
-    html = fh.read().replace("app.js?v=1.0.0", "app.js")
+    html = fh.read().replace("app.js?v=1.1.1", "app.js")
 open(os.path.join(T, "index.html"), "w").write(html)
 
 srv = subprocess.Popen([sys.executable, "-m", "http.server", "8765", "--directory", T], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -47,6 +47,9 @@ with sync_playwright() as p:
         if body["max_tokens"] == 10:
             return route.fulfill(status=200, content_type="application/json", body=json.dumps({"content": [{"type": "text", "text": "OK"}]}))
         ans = ki_answers[0]
+        if "tools" in body:
+            assert body["tool_choice"]["name"] == "beleg_daten"
+            return route.fulfill(status=200, content_type="application/json", body=json.dumps({"stop_reason": "tool_use", "content": [{"type": "thinking", "thinking": "..."}, {"type": "tool_use", "id": "t1", "name": "beleg_daten", "input": ans}]}))
         route.fulfill(status=200, content_type="application/json", body=json.dumps({"content": [{"type": "text", "text": json.dumps(ans)}]}))
     page.route("https://api.anthropic.com/**", ki_route)
 

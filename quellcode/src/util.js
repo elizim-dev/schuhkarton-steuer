@@ -204,29 +204,69 @@ Wähle die Kategorie exakt aus einer dieser Listen:
 Ausgaben: ${KATEGORIEN_AUSGABE.join(" | ")}
 Einnahmen: ${KATEGORIEN_EINNAHME.join(" | ")}
 Heute ist ${heute()}.
-Antworte NUR mit einem JSON-Objekt, ohne Erklärtext, mit diesen Feldern:
-{"art":"ausgabe"|"einnahme","belegdatum":"JJJJ-MM-TT","betrag":Zahl (Bruttogesamtbetrag in Euro, Punkt als Dezimaltrenner),"waehrung":"EUR","partner":"Name des Geschäftspartners (Aussteller bei Ausgabe, Kunde bei Einnahme)","rechnungsnr":"…" oder "","kategorie":"…","beschreibung":"kurze Beschreibung, max. 8 Wörter","bezahlt":true|false|null (true wenn erkennbar bezahlt, z. B. Kassenbon, Kartenzahlung, 'bezahlt'),"zahlungsdatum":"JJJJ-MM-TT" oder null,"begruendung":"ein Satz, warum diese Kategorie","unsicher":["feldname", …]}`;
+Trage die Daten über das Werkzeug „beleg_daten“ ein. Beträge als Zahl in Euro (Punkt als Dezimaltrenner), Datumsangaben als JJJJ-MM-TT. Liste in „unsicher“ die Feldnamen, bei denen du nicht sicher bist.`;
   content.push({ type: "text", text: prompt });
 
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-      "anthropic-dangerous-direct-browser-access": "true",
+  const tool = {
+    name: "beleg_daten",
+    description: "Ausgelesene Daten eines Belegs für die Buchhaltung",
+    input_schema: {
+      type: "object",
+      properties: {
+        art: { type: "string", enum: ["ausgabe", "einnahme"] },
+        belegdatum: { type: "string", description: "JJJJ-MM-TT" },
+        betrag: { type: "number", description: "Bruttogesamtbetrag in Euro" },
+        waehrung: { type: "string" },
+        partner: { type: "string", description: "Aussteller bei Ausgabe, Kunde bei Einnahme" },
+        rechnungsnr: { type: "string" },
+        kategorie: { type: "string", enum: [...KATEGORIEN_AUSGABE, ...KATEGORIEN_EINNAHME] },
+        beschreibung: { type: "string", description: "kurz, max. 8 Wörter" },
+        bezahlt: { type: ["boolean", "null"], description: "true, wenn erkennbar bezahlt (Kassenbon, Kartenzahlung, 'bezahlt')" },
+        zahlungsdatum: { type: ["string", "null"], description: "JJJJ-MM-TT oder null" },
+        begruendung: { type: "string", description: "ein Satz, warum diese Kategorie" },
+        unsicher: { type: "array", items: { type: "string" } },
+      },
+      required: ["art", "belegdatum", "betrag", "partner", "kategorie"],
     },
-    body: JSON.stringify({ model: modell, max_tokens: 800, messages: [{ role: "user", content }] }),
-  });
-  const j = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const m = (j.error && j.error.message) || res.status;
-    throw new Error("KI-Fehler: " + m);
-  }
-  const text = (j.content || []).filter((c) => c.type === "text").map((c) => c.text).join("");
+  };
+
+  const anfrage = async (mitWerkzeug) => {
+    const body = { model: modell, max_tokens: 2000, messages: [{ role: "user", content }] };
+    if (mitWerkzeug) {
+      body.tools = [tool];
+      body.tool_choice = { type: "tool", name: "beleg_daten" };
+    } else {
+      body.messages[0].content = [...content.slice(0, -1), { type: "text", text: prompt + "\nAntworte ausschließlich mit einem JSON-Objekt mit den Feldern art, belegdatum, betrag, waehrung, partner, rechnungsnr, kategorie, beschreibung, bezahlt, zahlungsdatum, begruendung, unsicher." }];
+    }
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        "anthropic-dangerous-direct-browser-access": "true",
+      },
+      body: JSON.stringify(body),
+    });
+    const j = await res.json().catch(() => ({}));
+    return { ok: res.ok, status: res.status, j };
+  };
+
+  let r = await anfrage(true);
+  // Falls das Modell Werkzeuge in dieser Form nicht annimmt: Textmodus
+  if (!r.ok && r.status === 400) r = await anfrage(false);
+  if (!r.ok) throw new Error("KI-Fehler: " + ((r.j.error && r.j.error.message) || r.status));
+
+  const bloecke = r.j.content || [];
+  const werkzeug = bloecke.find((c) => c.type === "tool_use" && c.input);
+  if (werkzeug) return werkzeug.input;
+  const text = bloecke.filter((c) => c.type === "text").map((c) => c.text).join("");
   const m = text.match(/\{[\s\S]*\}/);
-  if (!m) throw new Error("KI-Antwort nicht lesbar");
-  return JSON.parse(m[0]);
+  if (m) {
+    try { return JSON.parse(m[0]); } catch (_) {}
+  }
+  const info = r.j.stop_reason === "max_tokens" ? "Antwort zu lang abgebrochen" : text ? `„${text.slice(0, 120)}…“` : `keine Textantwort (${bloecke.map((c) => c.type).join(", ") || "leer"})`;
+  throw new Error("KI-Antwort nicht lesbar: " + info);
 }
 
 export async function kiTest(apiKey, modell) {
