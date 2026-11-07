@@ -1,6 +1,6 @@
 // Schuhkarton Steuer – Oberfläche und Ablauf
 import {
-  VERSION, CONFIG_FILE, JOURNAL_FILE, BELEGE_FOLDER, KI_MODELLE, KI_STANDARD,
+  VERSION, CONFIG_FILE, JOURNAL_FILE, BELEGE_FOLDER, KI_MODELLE, KI_STANDARD, VERBINDUNGEN_FILE, REDIRECT_URI,
   KATEGORIEN_AUSGABE, KATEGORIEN_EINNAHME, EIGENBELEG_GRUENDE,
   KM_PAUSCHALE_CENT, HOMEOFFICE_TAG_CENT, HOMEOFFICE_MAX_CENT,
 } from "./config.js";
@@ -44,6 +44,115 @@ const istGbR = () => aktivData() && aktivData().config.typ === "gbr";
 function speichereBetriebe() {
   ls.set("sk_betriebe", S.betriebe);
   ls.set("sk_active", S.active);
+}
+
+// --- Rollen ------------------------------------------------------------------
+const meineMail = () => ((S.account && S.account.username) || "").toLowerCase();
+// Ohne festgelegte Admins (ältere Betriebsdaten) dürfen alle verwalten, bis Admins eingetragen sind
+const istAdmin = (cfg) => !!cfg && (!Array.isArray(cfg.admins) || !cfg.admins.length || cfg.admins.map((x) => x.toLowerCase()).includes(meineMail()));
+const cfgVon = (b) => (S.data[b.key] ? S.data[b.key].config : null);
+
+// --- Verbindungen geräteübergreifend im persönlichen App-Ordner -----------------
+const verbindungsDaten = () =>
+  S.betriebe.map(({ driveId, itemId, ordnerName, name, kurz, typ }) => ({ driveId, itemId, ordnerName, name, kurz, typ }));
+
+async function ladeVerbindungen() {
+  try {
+    const r = await G.appRoot();
+    const j = await G.readJson(r.driveId, r.id, VERBINDUNGEN_FILE);
+    if (j.data && Array.isArray(j.data.betriebe)) {
+      S.betriebe = j.data.betriebe.map((x) => {
+        const lokal = S.betriebe.find((l) => l.itemId === x.itemId);
+        return { ...x, key: lokal ? lokal.key : uuid() };
+      });
+      if (!aktiv()) S.active = S.betriebe[0] ? S.betriebe[0].key : null;
+      speichereBetriebe();
+    } else if (S.betriebe.length) {
+      await speichereVerbindungen();
+    }
+  } catch (e) {
+    console.warn("Verbindungen konnten nicht synchronisiert werden", e);
+  }
+}
+
+async function speichereVerbindungen() {
+  try {
+    const r = await G.appRoot();
+    await G.writeJson(r.driveId, r.id, VERBINDUNGEN_FILE, { betriebe: verbindungsDaten(), stand: new Date().toISOString() }, null);
+  } catch (e) {
+    console.warn("Verbindungen konnten nicht gespeichert werden", e);
+  }
+}
+
+// --- Einladungslinks -----------------------------------------------------------
+const b64url = (s) => btoa(unescape(encodeURIComponent(s))).replace(/=+$/, "").replace(/\+/g, "-").replace(/\//g, "_");
+const unb64url = (s) => decodeURIComponent(escape(atob(s.replace(/-/g, "+").replace(/_/g, "/"))));
+function einladungsLink(b, shareUrl) {
+  const code = b64url(JSON.stringify({ d: b.driveId, i: b.itemId, n: b.name, s: shareUrl || undefined }));
+  return `${REDIRECT_URI}?einladung=${code}`;
+}
+
+// Beim Öffnen eines Einladungslinks den Code merken (überlebt die Anmeldung)
+(function merkeEinladung() {
+  const p = new URLSearchParams(location.search);
+  const code = p.get("einladung");
+  if (code) {
+    ls.set("sk_einladung", code);
+    history.replaceState(null, "", location.pathname);
+  }
+})();
+
+async function einladungAnnehmen() {
+  const code = ls.get("sk_einladung", null);
+  if (!code) return;
+  let inv;
+  try { inv = JSON.parse(unb64url(code)); } catch (_) {
+    ls.set("sk_einladung", null);
+    return toast("Der Einladungslink ist ungültig.", "fehler");
+  }
+  busy(`Verbinde „${inv.n}“ …`);
+  try {
+    let ziel = { driveId: inv.d, id: inv.i, name: inv.n };
+    if (inv.s) {
+      try { ziel = await G.resolveShareLink(inv.s); } catch (e) { console.warn(e); }
+    }
+    const cfg = await G.readJson(ziel.driveId, ziel.id, CONFIG_FILE);
+    if (!cfg.data) throw new Error("Dieser Betrieb ist noch nicht eingerichtet. Bitte die Admin fragen.");
+    let b = S.betriebe.find((x) => x.itemId === ziel.id);
+    if (!b) {
+      b = { key: uuid(), driveId: ziel.driveId, itemId: ziel.id, ordnerName: ziel.name, name: cfg.data.name, kurz: cfg.data.kurz, typ: cfg.data.typ };
+      S.betriebe.push(b);
+    }
+    S.active = b.key;
+    speichereBetriebe();
+    await speichereVerbindungen();
+    await ladeBetrieb(b, true);
+    ls.set("sk_einladung", null);
+    busy(null);
+    closeModal();
+    S.view = "erfassen";
+    toast(`„${b.name}“ ist verbunden`);
+    render();
+  } catch (e) {
+    busy(null);
+    if ([401, 403, 404].includes(e.status)) zeigeEinladungHilfe(inv);
+    else fehler(e);
+  }
+}
+
+function zeigeEinladungHilfe(inv) {
+  modal(`
+    <div class="kopf"><h2>Noch kein Zugriff</h2></div>
+    <p>Du wurdest für <b>„${esc(inv.n)}“</b> eingeladen, aber OneDrive hat den Zugriff noch nicht freigegeben.</p>
+    <ol class="schritte">
+      <li>Öffne die E-Mail von OneDrive („… hat einen Ordner mit Ihnen geteilt“) und tippe auf <b>Öffnen</b>.</li>
+      <li>Melde dich dort mit demselben Microsoft-Konto an wie hier: <b>${esc(S.account.username)}</b></li>
+      <li>Komm zurück und tippe auf <b>Erneut versuchen</b>.</li>
+    </ol>
+    <div class="aktionen">
+      <button class="primary" data-act="einladung-retry">Erneut versuchen</button>
+      <button class="sekundaer" data-act="einladung-abbrechen">Abbrechen</button>
+    </div>`);
 }
 
 // ---------------------------------------------------------------------------
@@ -173,6 +282,7 @@ function renderLogin() {
       <img src="icons/icon-512.png" alt="" class="logo">
       <h1>Schuhkarton Steuer</h1>
       <p>Belege fotografieren, ablegen und die EÜR vorbereiten.</p>
+      ${ls.get("sk_einladung", null) ? `<p class="hinweis">Du wurdest eingeladen. Melde dich mit deinem Microsoft-Konto an – der Betrieb wird danach automatisch verbunden.</p>` : ""}
       <button class="primary big" data-act="login">Mit Microsoft anmelden</button>
       <p class="klein">Die Belege bleiben in deinem OneDrive.</p>
     </section>`;
@@ -675,13 +785,21 @@ function renderEinstellungen(main) {
   main.innerHTML = `
     <section class="card">
       <h2>Betriebe</h2>
-      ${S.betriebe.length ? `<ul class="betriebe">${S.betriebe.map((b) => `
-        <li><div><b>${esc(b.name)}</b><small>${b.typ === "gbr" ? "GbR" : "Einzelunternehmen"} · Ordner: ${esc(b.ordnerName || "")}</small></div>
-          <div class="knoepfe"><button class="link" data-act="cfg" data-key="${b.key}">Betriebsdaten</button>
-          <button class="link rot" data-act="trennen" data-key="${b.key}">Trennen</button></div></li>`).join("")}</ul>`
+      ${S.betriebe.length ? `<ul class="betriebe">${S.betriebe.map((b) => {
+        const cfg = cfgVon(b);
+        const admin = istAdmin(cfg);
+        const ohneAdmins = cfg && (!Array.isArray(cfg.admins) || !cfg.admins.length);
+        return `
+        <li><div><b>${esc(b.name)}</b><small>${b.typ === "gbr" ? "GbR" : "Einzelunternehmen"} · Rolle: ${admin ? "Admin" : "Erfassen"}</small>
+          ${ohneAdmins ? `<small class="warnung">Noch keine Admins festgelegt – bitte unter „Betriebsdaten“ eintragen.</small>` : ""}</div>
+          <div class="knoepfe">
+          ${admin ? `<button class="link" data-act="cfg" data-key="${b.key}">Betriebsdaten</button>
+          <button class="link" data-act="personen" data-key="${b.key}">Personen freischalten</button>` : ""}
+          <button class="link rot" data-act="trennen" data-key="${b.key}">Trennen</button></div></li>`;
+      }).join("")}</ul>`
         : `<p>Noch kein Betrieb verbunden.</p>`}
       <button class="primary" data-act="verbinden">＋ Betriebsordner verbinden</button>
-      <p class="klein">„Trennen“ entfernt die Verbindung nur auf diesem Gerät. Daten in OneDrive bleiben unverändert.</p>
+      <p class="klein">Verbundene Betriebe werden in deinem OneDrive gemerkt und erscheinen auf allen deinen Geräten. „Trennen“ entfernt nur deine Verbindung – die Daten des Betriebs bleiben unverändert.</p>
     </section>
     <section class="card">
       <h2>KI-Auslesen</h2>
@@ -753,11 +871,19 @@ async function ordnerGewaehlt() {
       S.betriebe.push(b);
       S.active = b.key;
       speichereBetriebe();
+      await speichereVerbindungen();
       await ladeBetrieb(b, true);
       toast(`„${b.name}“ verbunden`);
       S.view = "erfassen";
       render();
     } else {
+      // Neue Betriebe nur in einem Ordner im eigenen OneDrive anlegen (Besitzerin = erste Admin)
+      const mein = await G.myDrive();
+      if (mein.id !== top.driveId) {
+        modal(`<div class="kopf"><h2>Noch nicht eingerichtet</h2><button class="link" data-act="modal-zu">Schließen</button></div>
+          <p>Für den Ordner „${esc(top.name)}“ gibt es noch keine Betriebsdaten. Sie werden von einer Admin angelegt. Bitte melde dich bei ihr – danach kannst du den Ordner hier verbinden.</p>`);
+        return;
+      }
       zeigeConfig(b, true);
     }
   } catch (e) { fehler(e); }
@@ -771,8 +897,10 @@ function zeigeConfig(b, neu) {
     steuernummer: "",
     kleinunternehmer: true,
     gesellschafter: [{ name: "", anteil: 50 }, { name: "", anteil: 50 }],
+    admins: [meineMail()],
   };
   const ges = c.gesellschafter && c.gesellschafter.length ? c.gesellschafter : [{ name: "", anteil: 50 }, { name: "", anteil: 50 }];
+  const admins = Array.isArray(c.admins) && c.admins.length ? c.admins : [meineMail()];
   modal(`
     <div class="kopf"><h2>${neu ? "Neuen Betrieb einrichten" : "Betriebsdaten"}</h2><button class="link" data-act="modal-zu">Abbrechen</button></div>
     ${neu ? `<p class="hinweis">In diesem Ordner gibt es noch keine Betriebsdaten. Sie werden einmalig angelegt und gelten für alle, die den Ordner nutzen.</p>` : ""}
@@ -786,6 +914,9 @@ function zeigeConfig(b, neu) {
         <legend>Gesellschafterinnen und Anteile</legend>
         ${ges.map((g, i) => `<div class="zwei"><label>Name<input name="g${i}name" value="${esc(g.name)}"></label><label>Anteil %<input name="g${i}anteil" inputmode="decimal" value="${esc(g.anteil)}"></label></div>`).join("")}
       </fieldset>
+      <label>Admins (Microsoft-Konto, eine E-Mail-Adresse pro Zeile)
+        <textarea name="admins" rows="3" autocapitalize="off" autocorrect="off" spellcheck="false">${esc(admins.join("\n"))}</textarea></label>
+      <p class="klein">Admins dürfen Betriebsdaten ändern und Personen freischalten. Alle anderen mit Zugriff können Belege erfassen und das Journal sehen.</p>
       <div class="aktionen"><button type="submit" class="primary big">Speichern</button></div>
     </form>`);
   const form = modalEl.querySelector("#cfgform");
@@ -803,9 +934,12 @@ function zeigeConfig(b, neu) {
       steuernummer: f.steuernummer.trim(),
       kleinunternehmer: !!f.kleinunternehmer,
       gesellschafter: f.typ === "gbr" ? ges.map((_, i) => ({ name: (f[`g${i}name`] || "").trim(), anteil: parseFloat(String(f[`g${i}anteil`]).replace(",", ".")) || 0 })).filter((g) => g.name) : [],
+      admins: [...new Set(String(f.admins || "").split(/[\s,;]+/).map((x) => x.trim().toLowerCase()).filter((x) => x.includes("@")))],
       geaendertVon: ichBin(),
       geaendertAm: new Date().toISOString(),
     };
+    if (!cfg.admins.length) return toast("Bitte mindestens eine Admin-Adresse eintragen.", "fehler");
+    if (!cfg.admins.includes(meineMail()) && !confirm("Deine eigene Adresse steht nicht in der Admin-Liste. Du kannst die Betriebsdaten danach nicht mehr ändern. Trotzdem speichern?")) return;
     if (cfg.typ === "gbr") {
       const summe = cfg.gesellschafter.reduce((s, g) => s + g.anteil, 0);
       if (cfg.gesellschafter.length < 2) return toast("Bitte beide Gesellschafterinnen eintragen.", "fehler");
@@ -819,6 +953,7 @@ function zeigeConfig(b, neu) {
       if (!S.betriebe.includes(b)) S.betriebe.push(b);
       S.active = b.key;
       speichereBetriebe();
+      await speichereVerbindungen();
       await ladeBetrieb(b, true);
       S.data[b.key].configEtag = item && item.eTag;
       busy(null);
@@ -831,6 +966,81 @@ function zeigeConfig(b, neu) {
       fehler(e);
     }
   });
+}
+
+// ---------------------------------------------------------------------------
+// Personen freischalten (nur Admins)
+// ---------------------------------------------------------------------------
+function personAus(p) {
+  const u = (p.grantedToV2 && p.grantedToV2.user) || (p.grantedTo && p.grantedTo.user) || null;
+  const ids = (p.grantedToIdentitiesV2 || p.grantedToIdentities || []).map((x) => x.user).filter(Boolean);
+  const name = (u && (u.displayName || u.email)) || ids.map((x) => x.displayName || x.email).join(", ") || (p.invitation && p.invitation.email) || "";
+  const email = (u && u.email) || (ids[0] && ids[0].email) || (p.invitation && p.invitation.email) || "";
+  return { name, email };
+}
+
+async function zeigePersonen(b) {
+  busy("Lade Freigaben …");
+  let perms = [];
+  try { perms = await G.listPermissions(b.driveId, b.itemId); } catch (e) { busy(null); return fehler(e); }
+  busy(null);
+  const cfg = cfgVon(b);
+  const admins = (cfg && cfg.admins) || [];
+  const zeilen = perms.map((p) => {
+    const roles = p.roles || [];
+    const { name, email } = personAus(p);
+    if (roles.includes("owner")) return `<li><div><b>${esc(name || "Besitzerin")}</b><small>Besitzerin</small></div></li>`;
+    if (p.link && !name) return `<li><div><b>Freigabelink</b><small>${esc(p.link.scope || "")} · ${roles.includes("write") ? "bearbeiten" : "ansehen"}</small></div>
+      ${p.inheritedFrom ? "" : `<button class="link rot" data-act="perm-weg" data-id="${esc(p.id)}" data-key="${b.key}">Entfernen</button>`}</li>`;
+    const istAdm = email && admins.includes(email.toLowerCase());
+    return `<li><div><b>${esc(name || email || "Unbekannt")}</b><small>${roles.includes("write") ? "darf erfassen" : "nur ansehen"}${istAdm ? " · Admin" : ""}${p.inheritedFrom ? " · über übergeordneten Ordner" : ""}</small></div>
+      ${p.inheritedFrom ? "" : `<button class="link rot" data-act="perm-weg" data-id="${esc(p.id)}" data-key="${b.key}">Entfernen</button>`}</li>`;
+  });
+  modal(`
+    <div class="kopf"><h2>Personen · ${esc(b.name)}</h2><button class="link" data-act="modal-zu">Schließen</button></div>
+    <h3>Zugriff haben</h3>
+    <ul class="betriebe">${zeilen.join("") || `<li class="leer">Noch niemand freigeschaltet</li>`}</ul>
+    <h3>Person freischalten</h3>
+    <form id="einladen">
+      <label>E-Mail-Adresse ihres Microsoft-Kontos<input name="email" type="email" required autocapitalize="off" placeholder="name@beispiel.de"></label>
+      <div class="aktionen"><button type="submit" class="primary">Freischalten und Einladung erstellen</button></div>
+    </form>
+    <p class="klein">OneDrive schickt der Person eine E-Mail. Zusätzlich bekommst du einen Einladungslink für die App, den du ihr schickst.</p>
+    <button class="link" data-act="nur-link" data-key="${b.key}">Nur Einladungslink erzeugen (für Personen, die schon Zugriff haben)</button>`);
+  modalEl.querySelector("#einladen").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const email = ev.target.email.value.trim();
+    busy("Schalte frei …");
+    try {
+      const res = await G.invite(b.driveId, b.itemId, email, `Du wurdest für „${b.name}“ in der App Schuhkarton Steuer freigeschaltet.`);
+      const p = res && res.value && res.value[0];
+      const shareUrl = p && p.link && p.link.webUrl;
+      busy(null);
+      zeigeEinladungslink(b, einladungsLink(b, shareUrl), email);
+    } catch (e) { fehler(e); }
+  });
+}
+
+function zeigeEinladungslink(b, link, email) {
+  const text = `Hallo! Ich habe dich für „${b.name}“ in unserer Beleg-App „Schuhkarton Steuer“ freigeschaltet.\n\n1. Öffne die E-Mail von OneDrive und tippe auf „Öffnen“ (mit deinem Microsoft-Konto anmelden).\n2. Öffne dann diesen Link und melde dich an:\n${link}\n\nTipp: Auf dem Handy die App danach über „Zum Home-Bildschirm“ hinzufügen.`;
+  modal(`
+    <div class="kopf"><h2>Einladung</h2><button class="link" data-act="modal-zu">Fertig</button></div>
+    ${email ? `<p>✓ <b>${esc(email)}</b> hat jetzt Zugriff auf „${esc(b.name)}“ und bekommt eine E-Mail von OneDrive.</p>` : ""}
+    <p>Schick ihr zusätzlich diese Nachricht:</p>
+    <textarea id="einladungstext" rows="9" readonly>${esc(text)}</textarea>
+    <div class="aktionen">
+      <button class="primary" data-act="text-kopieren">Text kopieren</button>
+      ${navigator.share ? `<button class="sekundaer" data-act="text-teilen">Teilen …</button>` : ""}
+    </div>`);
+}
+
+async function entfernePerm(b, permId) {
+  if (!confirm("Zugriff dieser Person auf den Ordner entfernen? Sie kann den Betrieb dann nicht mehr öffnen.")) return;
+  busy("Entferne Freigabe …");
+  await G.deletePermission(b.driveId, b.itemId, permId);
+  busy(null);
+  toast("Freigabe entfernt");
+  await zeigePersonen(b);
 }
 
 // ---------------------------------------------------------------------------
@@ -933,8 +1143,24 @@ document.addEventListener("click", async (ev) => {
         if (!confirm(`Verbindung zu „${b.name}“ auf diesem Gerät entfernen?`)) return;
         S.betriebe = S.betriebe.filter((x) => x !== b);
         if (S.active === b.key) S.active = S.betriebe[0] ? S.betriebe[0].key : null;
-        speichereBetriebe(); render(); break;
+        speichereBetriebe(); await speichereVerbindungen(); render(); break;
       }
+      case "personen": await zeigePersonen(S.betriebe.find((x) => x.key === el.dataset.key)); break;
+      case "perm-weg": await entfernePerm(S.betriebe.find((x) => x.key === el.dataset.key), el.dataset.id); break;
+      case "nur-link": {
+        const b = S.betriebe.find((x) => x.key === el.dataset.key);
+        zeigeEinladungslink(b, einladungsLink(b), null); break;
+      }
+      case "text-kopieren": {
+        const t = document.getElementById("einladungstext");
+        try { await navigator.clipboard.writeText(t.value); } catch (_) { t.select(); document.execCommand("copy"); }
+        toast("Text kopiert"); break;
+      }
+      case "text-teilen":
+        try { await navigator.share({ text: document.getElementById("einladungstext").value }); } catch (_) {}
+        break;
+      case "einladung-retry": closeModal(); await einladungAnnehmen(); break;
+      case "einladung-abbrechen": ls.set("sk_einladung", null); closeModal(); break;
       case "ki-speichern":
         ls.set("sk_apikey", document.getElementById("apikey").value.trim());
         ls.set("sk_modell", document.getElementById("modell").value);
@@ -961,12 +1187,15 @@ document.addEventListener("click", async (ev) => {
     toast("Anmeldung fehlgeschlagen: " + e.message, "fehler");
   }
   if (S.account) {
+    busy("Lade Daten …");
+    await ladeVerbindungen();
     if (!aktiv() && S.betriebe.length) { S.active = S.betriebe[0].key; speichereBetriebe(); }
-    if (aktiv()) {
-      busy("Lade Daten …");
-      try { await ladeBetrieb(aktiv(), true); } catch (e) { fehler(e); }
-      busy(null);
-    } else S.view = "einstellungen";
+    for (const b of S.betriebe) {
+      try { await ladeBetrieb(b, true); } catch (e) { console.warn(e); if (b === aktiv()) fehler(e); }
+    }
+    busy(null);
+    if (!aktiv()) S.view = "einstellungen";
   }
   render();
+  if (S.account && ls.get("sk_einladung", null)) await einladungAnnehmen();
 })();

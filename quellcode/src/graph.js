@@ -214,6 +214,42 @@ export async function uploadFile(driveId, parentId, name, blob, { overwrite = fa
   return last;
 }
 
+// --- Freigaben (Personen freischalten) ---------------------------------------
+
+export async function invite(driveId, itemId, email, nachricht) {
+  return gj(`${itemPath(driveId, itemId)}/invite`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      recipients: [{ email }],
+      requireSignIn: true,
+      sendInvitation: true,
+      roles: ["write"],
+      message: nachricht,
+    }),
+  });
+}
+
+export async function listPermissions(driveId, itemId) {
+  const j = await gj(`${itemPath(driveId, itemId)}/permissions`);
+  return j.value || [];
+}
+
+export async function deletePermission(driveId, itemId, permId) {
+  return gj(`${itemPath(driveId, itemId)}/permissions/${permId}`, { method: "DELETE" });
+}
+
+// --- Persönlicher App-Ordner (Verbindungen geräteübergreifend merken) ---------
+
+let approot = null;
+export async function appRoot() {
+  if (!approot) {
+    const it = await gj("/me/drive/special/approot?$select=id,parentReference");
+    approot = { driveId: it.parentReference.driveId, id: it.id };
+  }
+  return approot;
+}
+
 export async function renameItem(driveId, itemId, name) {
   return gj(`${itemPath(driveId, itemId)}?@microsoft.graph.conflictBehavior=rename`, {
     method: "PATCH",

@@ -1,5 +1,5 @@
 // Feste Konfiguration der App „Schuhkarton Steuer“
-export const VERSION = "1.0.0";
+export const VERSION = "1.1.0";
 
 export const CLIENT_ID = "e15c462d-09ab-471a-bda0-7b7b06581e86";
 export const REGISTERED_REDIRECT = "https://elizim-dev.github.io/schuhkarton-steuer/";
@@ -58,3 +58,6 @@ export const EIGENBELEG_GRUENDE = [
   "Interne Buchung (Einlage/Entnahme)",
   "Sonstiges",
 ];
+
+// Persönliche Verbindungsliste im App-Ordner der jeweiligen Person (OneDrive/Apps/…)
+export const VERBINDUNGEN_FILE = "verbindungen.json";

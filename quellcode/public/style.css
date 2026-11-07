@@ -186,3 +186,9 @@ table.detail td { padding: 6px 0; border-bottom: 1px solid var(--linie); word-br
 .gesk { background: var(--bg); border-radius: 10px; padding: 8px 10px; font-size: .88rem; display: grid; gap: 4px; }
 .gesk > b { font-size: .95rem; }
 .gesk small { display: block; font-size: .72rem; }
+h3 { font-size: .95rem; margin: 1.2em 0 .4em; color: var(--leise); }
+textarea { font: inherit; color: var(--text); width: 100%; border: 1px solid var(--linie); border-radius: 10px; padding: 10px 12px; background: #fff; resize: vertical; }
+textarea:focus { outline: 2px solid var(--karton); border-color: var(--karton); }
+#einladungstext { font-size: .9rem; background: var(--bg); }
+.warnung { color: var(--gelb) !important; }
+.schritte { padding-left: 1.2em; display: grid; gap: 6px; }
