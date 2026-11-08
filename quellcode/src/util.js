@@ -116,6 +116,8 @@ export function eigenbelegPdf(e, betrieb, ersteller) {
   else zeile(e.art === "einnahme" ? "Zahlende/r:" : "Empfänger/in:", e.partner);
   if (e.kategorie) zeile("Kategorie:", e.kategorie);
   zeile("Zweck / Anlass:", e.beschreibung);
+  if (e.anteilProzent) zeile("Betrieblicher Anteil:", `${String(e.anteilProzent).replace(".", ",")} % von ${euro(e.gesamtCent)}`);
+  if (e.bewAnlass) { zeile("Bewirtung Anlass:", e.bewAnlass); zeile("Teilnehmende:", e.bewTeilnehmende); zeile("Ort:", e.bewOrt); }
   zeile("Grund Eigenbeleg:", e.eigenbelegGrund);
   if (e.pauschale) zeile("Berechnung:", e.pauschale);
   y += 6;
@@ -155,14 +157,17 @@ export function journalExcel(journal, config) {
         "Bezahlt von": e.bezahltVon === "betrieb" || !e.bezahltVon ? "" : e.bezahltVon,
         Behandlung: BEHANDLUNG_TEXT[e.behandlung] || "",
         Eigenbeleg: e.eigenbeleg ? "ja" : "",
+        "Anteil %": e.anteilProzent || "",
+        "Rechnungsbetrag (€)": e.gesamtCent ? e.gesamtCent / 100 : "",
+        "Bewirtung (Anlass / Teilnehmende / Ort)": e.bewAnlass ? `${e.bewAnlass} / ${e.bewTeilnehmende} / ${e.bewOrt}` : "",
         "Erfasst von": e.erfasstVon || "",
         Datei: e.datei ? e.datei.name : "",
       }));
     const ws = XLSX.utils.json_to_sheet(rows);
-    ws["!cols"] = [10, 11, 13, 10, 11, 28, 24, 32, 14, 10, 14, 20, 10, 16, 40].map((w) => ({ wch: w }));
+    ws["!cols"] = [10, 11, 13, 10, 11, 28, 24, 32, 14, 10, 14, 20, 10, 8, 14, 36, 16, 40].map((w) => ({ wch: w }));
     rows.forEach((r, i) => {
       const e = journal.eintraege.find((x) => x.belegnr === r["Beleg-Nr."]);
-      const cell = ws[XLSX.utils.encode_cell({ r: i + 1, c: 14 })];
+      const cell = ws[XLSX.utils.encode_cell({ r: i + 1, c: 17 })];
       if (cell && e && e.datei && e.datei.webUrl) cell.l = { Target: e.datei.webUrl };
     });
     XLSX.utils.book_append_sheet(wb, ws, jahr);
@@ -283,4 +288,85 @@ export async function kiTest(apiKey, modell) {
   const j = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error((j.error && j.error.message) || "Fehler " + res.status);
   return true;
+}
+
+// --- PDF „EÜR <Jahr>“ ----------------------------------------------------------
+export function euerPdf({ config, jahr, eu, gesellschaft, eintraege, ersteller }) {
+  const pdf = new jsPDF({ unit: "mm", format: "a4" });
+  const L = 18;
+  const R = 192;
+  let y = 20;
+  const neueSeite = () => { pdf.addPage(); y = 20; };
+  const platz = (h) => { if (y + h > 280) neueSeite(); };
+  const text = (t, x, opts = {}) => pdf.text(String(t), x, y, opts);
+  pdf.setFontSize(16); pdf.setFont(undefined, "bold"); text(`Einnahmenüberschussrechnung ${jahr}`, L);
+  y += 8; pdf.setFontSize(10); pdf.setFont(undefined, "normal");
+  text(`${config.name}${config.steuernummer ? " · Steuernummer " + config.steuernummer : ""}`, L); y += 5;
+  text(`${config.kleinunternehmer !== false ? "Kleinunternehmerregelung (§ 19 UStG) – Beträge brutto" : ""}`, L); y += 5;
+  text(`Stand: ${new Date().toLocaleString("de-DE")} · erstellt von ${ersteller}`, L); y += 9;
+
+  const kopfzeile = (cols) => {
+    platz(8); pdf.setFont(undefined, "bold");
+    cols.forEach(([t, x, a]) => text(t, x, a ? { align: a } : {}));
+    pdf.setFont(undefined, "normal"); y += 2; pdf.line(L, y, R, y); y += 5;
+  };
+  const zeilen = (z, betrag, fett) => {
+    const lines = pdf.splitTextToSize(z.bez + (z.nichtAbziehbar ? ` (gesamt ${euro(z.brutto)}, nicht abziehbar ${euro(z.nichtAbziehbar)})` : ""), 120);
+    platz(5 * lines.length + 1);
+    if (fett) pdf.setFont(undefined, "bold");
+    text(z.zeile || (fett ? "" : "–"), L); pdf.text(lines, L + 16, y); text(euro(betrag), R, { align: "right" });
+    pdf.setFont(undefined, "normal"); y += 5 * lines.length;
+  };
+  pdf.setFontSize(12); pdf.setFont(undefined, "bold"); text("Betriebseinnahmen", L); y += 7; pdf.setFontSize(10);
+  kopfzeile([["Zeile", L], ["Bezeichnung", L + 16], ["Betrag", R, "right"]]);
+  eu.zeilen.filter((z) => z.typ === "einnahme" && z.betrag).forEach((z) => zeilen(z, z.betrag));
+  zeilen({ zeile: "23", bez: "Summe Betriebseinnahmen" }, eu.be, true); y += 5;
+  pdf.setFontSize(12); pdf.setFont(undefined, "bold"); platz(14); text("Betriebsausgaben", L); y += 7; pdf.setFontSize(10);
+  kopfzeile([["Zeile", L], ["Bezeichnung", L + 16], ["Betrag", R, "right"]]);
+  eu.zeilen.filter((z) => z.typ === "ausgabe" && z.brutto).forEach((z) => zeilen(z, z.betrag));
+  zeilen({ zeile: "", bez: "Summe Betriebsausgaben" }, eu.ba, true); y += 4;
+  pdf.line(L, y, R, y); y += 6;
+  pdf.setFontSize(12); zeilen({ zeile: "", bez: eu.gewinn >= 0 ? "Gewinn" : "Verlust" }, eu.gewinn, true); pdf.setFontSize(10);
+  y += 4;
+  pdf.setFontSize(8);
+  const hinweis = pdf.splitTextToSize("Zeilennummern laut Vordruck Anlage EÜR 2026, soweit eindeutig belegt; bei „–“ bitte anhand der Bezeichnung zuordnen. Maßgeblich ist die Bezeichnung im Steuerprogramm.", R - L);
+  platz(4 * hinweis.length); pdf.text(hinweis, L, y); y += 4 * hinweis.length + 4; pdf.setFontSize(10);
+
+  if (gesellschaft) {
+    platz(30);
+    pdf.setFontSize(12); pdf.setFont(undefined, "bold"); text("Für die Feststellungserklärung", L); y += 7; pdf.setFontSize(10);
+    const cols = gesellschaft.personen.map((p, i) => [p.name, R - (gesellschaft.personen.length - 1 - i) * 40, "right"]);
+    kopfzeile([["", L], ...cols]);
+    const reihe = (label, key, fett) => {
+      platz(6); if (fett) pdf.setFont(undefined, "bold");
+      text(label, L);
+      gesellschaft.personen.forEach((p, i) => text(euro(p[key]), R - (gesellschaft.personen.length - 1 - i) * 40, { align: "right" }));
+      pdf.setFont(undefined, "normal"); y += 5;
+    };
+    gesellschaft.personen.forEach((p) => (p.steuerAnteil = p.gewinnSteuer + p.sba));
+    reihe("Anteil am Gewinn", "steuerAnteil");
+    reihe("- Sonderbetriebsausgaben", "sba");
+    reihe("= Gewinnanteil", "gewinnSteuer", true);
+    y += 3; pdf.setFontSize(9); pdf.setFont(undefined, "italic"); text("Informativ (ohne steuerliche Wirkung):", L); pdf.setFont(undefined, "normal"); y += 5;
+    reihe("Einlagen", "einlagen");
+    reihe("Entnahmen", "entnahmen");
+    reihe("Kapitalkonto", "kapital");
+    pdf.setFontSize(10); y += 6;
+  }
+
+  neueSeite();
+  pdf.setFontSize(12); pdf.setFont(undefined, "bold"); text(`Belegliste ${jahr}`, L); y += 7; pdf.setFontSize(8);
+  kopfzeile([["Nr.", L], ["Bezahlt", L + 18], ["Partner / Beschreibung", L + 38], ["Kategorie", L + 110], ["Betrag", R, "right"]]);
+  pdf.setFont(undefined, "normal");
+  for (const e of eintraege) {
+    const minus = e.art === "ausgabe" || e.art === "entnahme";
+    const partner = pdf.splitTextToSize(`${e.partner || e.gesellschafterin || ""}${e.beschreibung ? " – " + e.beschreibung : ""}`, 68);
+    const kat = pdf.splitTextToSize((e.kategorie || (e.art === "einlage" ? "Einlage" : "Entnahme")) + (e.behandlung === "sonderbetriebsausgabe" ? " (SBA)" : ""), 46);
+    const h = 4 * Math.max(partner.length, kat.length);
+    platz(h + 1);
+    text(e.belegnr, L); text(datumDE(e.zahlungsdatum), L + 18); pdf.text(partner, L + 38, y); pdf.text(kat, L + 110, y);
+    text(`${minus ? "-" : "+"}${euro(e.betragCent)}`, R, { align: "right" });
+    y += h + 1;
+  }
+  return pdf.output("blob");
 }

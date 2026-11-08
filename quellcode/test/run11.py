@@ -12,7 +12,7 @@ shutil.copy(os.path.join(ROOT, "test", "mock-graph.js"), os.path.join(T, "src", 
 subprocess.run(["npx", "esbuild", os.path.join(T, "src", "main.js"), "--bundle", "--format=iife",
                 "--outfile=" + os.path.join(T, "app.js"), "--log-level=warning"], check=True, cwd=ROOT)
 with open(os.path.join(T, "index.html")) as fh:
-    html = fh.read().replace("app.js?v=1.1.1", "app.js")
+    html = fh.read().replace("app.js?v=1.2.0", "app.js")
 open(os.path.join(T, "index.html"), "w").write(html)
 
 srv = subprocess.Popen([sys.executable, "-m", "http.server", "8765", "--directory", T], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

@@ -9,7 +9,7 @@ S = 1024
 def draw(maskable=False):
     img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    bg = (244, 233, 220, 255)
+    bg = (255, 252, 251, 255)
     if maskable:
         d.rectangle([0, 0, S, S], fill=bg)
         scale, off = 0.72, S * 0.14
@@ -20,10 +20,11 @@ def draw(maskable=False):
     def P(x, y):
         return (off + x * scale * S, off + y * scale * S)
 
-    karton = (168, 115, 63, 255)
-    dunkel = (125, 82, 40, 255)
+    karton = (189, 158, 195, 255)   # Lila BD9EC3
+    dunkel = (47, 60, 86, 255)      # Dunkelblau 2F3C56
     papier = (255, 255, 255, 255)
-    linie = (200, 185, 168, 255)
+    linie = (206, 198, 212, 255)
+    gruen = (150, 188, 163, 255)    # Grün 96BCA3
 
     # Beleg ragt aus dem Karton
     d.rounded_rectangle([*P(0.30, 0.10), *P(0.70, 0.62)], radius=int(18 * scale), fill=papier, outline=linie, width=int(10 * scale))
@@ -31,7 +32,7 @@ def draw(maskable=False):
         y = 0.20 + i * 0.075
         d.rounded_rectangle([*P(0.36, y), *P(0.36 + w, y + 0.03)], radius=int(8 * scale), fill=linie)
     # Euro-Zeichen-Andeutung: Betragszeile
-    d.rounded_rectangle([*P(0.50, 0.50), *P(0.64, 0.545)], radius=int(8 * scale), fill=karton)
+    d.rounded_rectangle([*P(0.50, 0.50), *P(0.64, 0.545)], radius=int(8 * scale), fill=gruen)
 
     # Karton
     d.rounded_rectangle([*P(0.12, 0.48), *P(0.88, 0.90)], radius=int(26 * scale), fill=karton)
@@ -46,7 +47,7 @@ icon = draw()
 for size, name in [(512, "icon-512.png"), (192, "icon-192.png"), (180, "apple-touch-icon-raw.png")]:
     icon.resize((size, size), Image.LANCZOS).save(f"{OUT}/{name}")
 # Apple: ohne Transparenz
-apple = Image.new("RGB", (180, 180), (244, 233, 220))
+apple = Image.new("RGB", (180, 180), (255, 252, 251))
 raw = draw(maskable=True).resize((180, 180), Image.LANCZOS)
 apple.paste(raw, (0, 0), raw)
 apple.save(f"{OUT}/apple-touch-icon.png")

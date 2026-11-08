@@ -3,11 +3,13 @@ import {
   VERSION, CONFIG_FILE, JOURNAL_FILE, BELEGE_FOLDER, KI_MODELLE, KI_STANDARD, VERBINDUNGEN_FILE, REDIRECT_URI,
   KATEGORIEN_AUSGABE, KATEGORIEN_EINNAHME, EIGENBELEG_GRUENDE,
   KM_PAUSCHALE_CENT, HOMEOFFICE_TAG_CENT, HOMEOFFICE_MAX_CENT,
+  GWG_GRENZE_BRUTTO_CENT, KU_GRENZE_VORJAHR_CENT, KU_GRENZE_LAUFEND_CENT, VORLAGEN_FILE,
 } from "./config.js";
+import { aufteilen, migriereKategorien, euer, ergebnis, gesellschafterUebersicht, faelligePerioden, zahlJahr } from "./euer.js";
 import * as G from "./graph.js";
 import {
   esc, heute, uuid, euro, betragText, parseBetrag, datumDE, dateiname,
-  compressImage, bilderZuPdf, eigenbelegPdf, journalExcel, kiAuslesen, kiTest,
+  compressImage, bilderZuPdf, eigenbelegPdf, journalExcel, kiAuslesen, kiTest, euerPdf,
 } from "./util.js";
 
 // ---------------------------------------------------------------------------
@@ -194,13 +196,22 @@ async function ladeBetrieb(b, force = false) {
   if (S.data[b.key] && !force) return S.data[b.key];
   const cfg = await G.readJson(b.driveId, b.itemId, CONFIG_FILE);
   const jr = await G.readJson(b.driveId, b.itemId, JOURNAL_FILE);
+  const vl = await G.readJson(b.driveId, b.itemId, VORLAGEN_FILE).catch(() => ({ data: null, etag: null }));
   const d = {
     config: cfg.data || { name: b.name, kurz: b.kurz || b.name, typ: b.typ || "einzel", gesellschafter: [] },
     configEtag: cfg.etag,
     journal: jr.data || { version: 1, eintraege: [] },
     etag: jr.etag,
+    vorlagen: (vl.data && vl.data.vorlagen) || [],
+    vorlagenEtag: vl.etag,
   };
   S.data[b.key] = d;
+  // Kategorien aus Version 1.1 einmalig umstellen
+  if (jr.data && migriereKategorien({ eintraege: jr.data.eintraege.map((e) => ({ ...e })) })) {
+    try {
+      await updateJournal(b, (j) => { migriereKategorien(j); });
+    } catch (e) { console.warn("Kategorien-Umstellung fehlgeschlagen", e); }
+  }
   // Anzeigename lokal aktuell halten
   b.name = d.config.name; b.kurz = d.config.kurz; b.typ = d.config.typ;
   speichereBetriebe();
@@ -260,7 +271,7 @@ function render() {
     </header>
     <main id="main"></main>
     <nav class="tabs">
-      ${[["erfassen", "＋", "Erfassen"], ["journal", "☰", "Journal"], ["einstellungen", "⚙︎", "Einstellungen"]]
+      ${[["erfassen", "＋", "Erfassen"], ["journal", "☰", "Journal"], ["auswertung", "▤", "Auswertung"], ["einstellungen", "⚙︎", "Einstellungen"]]
         .map(([v, i, l]) => `<button data-act="view" data-view="${v}" class="${S.view === v ? "on" : ""}"><b>${i}</b><span>${l}</span></button>`).join("")}
     </nav>`;
   const main = document.getElementById("main");
@@ -273,6 +284,7 @@ function render() {
   }
   if (S.view === "erfassen") renderErfassen(main);
   else if (S.view === "journal") renderJournal(main);
+  else if (S.view === "auswertung") renderAuswertung(main);
   else renderEinstellungen(main);
 }
 
@@ -348,7 +360,11 @@ function formular(v, { neu, ohne, unsicher = [] }) {
     <label>Art<select name="art">${arten.map(([a, l]) => opt(a, l, art)).join("")}</select></label>
     <div class="zwei">
       <label class="${u("belegdatum")}">Belegdatum<input type="date" name="belegdatum" value="${esc(v.belegdatum || heute())}" required></label>
-      <label class="${u("betrag")}">Betrag (€)<input name="betrag" inputmode="decimal" placeholder="0,00" value="${v.betragCent ? betragText(v.betragCent) : esc(v.betrag || "")}" required></label>
+      <label class="${u("betrag")}"><span data-lbl="betrag">Betrag (€)</span><input name="betrag" inputmode="decimal" placeholder="0,00" value="${(v.gesamtCent || v.betragCent) ? betragText(v.gesamtCent || v.betragCent) : esc(v.betrag || "")}" required></label>
+    </div>
+    <div data-show="anteil" class="anteil">
+      <label>Betrieblicher Anteil (%)<input name="anteil" inputmode="decimal" value="${esc(v.anteilProzent ?? v.anteil ?? 100)}"></label>
+      <p class="klein" data-lbl="anteil"></p>
     </div>
     <div data-show="pauschale" class="pauschale">
       <label>Pauschale berechnen<select name="pauschaleTyp">
@@ -363,6 +379,12 @@ function formular(v, { neu, ohne, unsicher = [] }) {
     </select></label>
     <label data-show="kategorie" class="${u("kategorie")}">Kategorie<select name="kategorie"></select></label>
     <label>Beschreibung<input name="beschreibung" value="${esc(v.beschreibung || "")}" placeholder="z. B. Jahresabo Zoom"></label>
+    <fieldset data-show="bewirtung" class="bewirtung">
+      <legend>Angaben zur Bewirtung (Pflicht)</legend>
+      <label>Anlass<input name="bewAnlass" value="${esc(v.bewAnlass || "")}" placeholder="z. B. Projektbesprechung Kooperation"></label>
+      <label>Teilnehmende<input name="bewTeilnehmende" value="${esc(v.bewTeilnehmende || "")}" placeholder="Namen, inkl. dir selbst"></label>
+      <label>Ort<input name="bewOrt" value="${esc(v.bewOrt || "")}" placeholder="Restaurant, Stadt"></label>
+    </fieldset>
     <label data-show="rechnungsnr" class="${u("rechnungsnr")}">Rechnungs-Nr. (optional)<input name="rechnungsnr" value="${esc(v.rechnungsnr || "")}"></label>
     <div class="zwei" data-show="status">
       <label>Status<select name="status">${opt("bezahlt", "bezahlt", v.status || "bezahlt")}${opt("offen", "noch offen", v.status)}</select></label>
@@ -405,10 +427,17 @@ function bindFormular(form, v) {
       eigenbeleg: ohne,
       pauschale: ohne && art === "ausgabe",
       pauschaleMenge: ohne && art === "ausgabe" && form.pauschaleTyp.value !== "",
+      anteil: art === "ausgabe" && !form.pauschaleTyp.value,
+      bewirtung: art === "ausgabe" && form.kategorie.value === "Bewirtung",
     };
     form.querySelectorAll("[data-show]").forEach((el) => (el.style.display = show[el.dataset.show] ? "" : "none"));
     const lbl = form.querySelector('[data-lbl="partner"]');
     if (lbl) lbl.textContent = art === "einnahme" ? "Kunde / Zahlende:r" : "Lieferant / Empfänger:in";
+    const anteilP = parseFloat(String(form.anteil.value).replace(",", "."));
+    const teil = art === "ausgabe" && anteilP > 0 && anteilP < 100;
+    form.querySelector('[data-lbl="betrag"]').textContent = teil ? "Rechnungsbetrag (€)" : "Betrag (€)";
+    const gesamt = parseBetrag(form.betrag.value);
+    form.querySelector('[data-lbl="anteil"]').textContent = teil && gesamt > 0 ? `Gebucht wird: ${euro(Math.round((gesamt * anteilP) / 100))} (${String(anteilP).replace(".", ",")} % von ${euro(gesamt)})` : "100 % = ganze Rechnung ist betrieblich";
     if (art !== letzteArt && handel) {
       const liste = art === "einnahme" ? KATEGORIEN_EINNAHME : KATEGORIEN_AUSGABE;
       const sel = liste.includes(v.kategorie) ? v.kategorie : katSel.value;
@@ -422,10 +451,10 @@ function bindFormular(form, v) {
     if (!typ || !n) return;
     if (typ === "km") {
       form.betrag.value = betragText(Math.round(n * KM_PAUSCHALE_CENT));
-      if (!form.kategorie.value) form.kategorie.value = "Reise- und Fahrtkosten";
+      form.kategorie.value = "Fahrtkosten eigener Pkw";
     } else {
       form.betrag.value = betragText(Math.min(Math.round(n * HOMEOFFICE_TAG_CENT), HOMEOFFICE_MAX_CENT));
-      if (!form.kategorie.value) form.kategorie.value = "Raumkosten, Homeoffice-Pauschale";
+      form.kategorie.value = "Homeoffice-Pauschale";
     }
     form.eigenbelegGrund.value = EIGENBELEG_GRUENDE[0];
   };
@@ -436,6 +465,8 @@ function bindFormular(form, v) {
     update();
   });
   form.pauschaleMenge.addEventListener("input", pauschale);
+  form.betrag.addEventListener("input", update);
+  form.anteil.addEventListener("input", update);
   update();
 }
 
@@ -443,9 +474,14 @@ function leseFormular(form) {
   const f = Object.fromEntries(new FormData(form).entries());
   const art = f.art;
   const handel = art === "ausgabe" || art === "einnahme";
-  const betragCent = parseBetrag(f.betrag);
+  const gesamtCent = parseBetrag(f.betrag);
   if (!f.belegdatum) throw new Error("Bitte ein Belegdatum angeben.");
-  if (!(betragCent > 0)) throw new Error("Bitte einen gültigen Betrag angeben.");
+  if (!(gesamtCent > 0)) throw new Error("Bitte einen gültigen Betrag angeben.");
+  let anteilProzent = art === "ausgabe" && !f.pauschaleTyp ? parseFloat(String(f.anteil || "100").replace(",", ".")) : 100;
+  if (!(anteilProzent > 0 && anteilProzent <= 100)) throw new Error("Der betriebliche Anteil muss zwischen 1 und 100 % liegen.");
+  const betragCent = Math.round((gesamtCent * anteilProzent) / 100);
+  const bewirtung = art === "ausgabe" && f.kategorie === "Bewirtung";
+  if (bewirtung && (!f.bewAnlass.trim() || !f.bewTeilnehmende.trim() || !f.bewOrt.trim())) throw new Error("Bitte bei Bewirtungen Anlass, Teilnehmende und Ort angeben – das verlangt das Finanzamt.");
   if (handel && !f.kategorie) throw new Error("Bitte eine Kategorie wählen.");
   if (handel && !f.partner.trim()) throw new Error(art === "einnahme" ? "Bitte Kunde/Zahlende:n angeben." : "Bitte Lieferant/Empfänger:in angeben.");
   if (!handel && !f.gesellschafterin) throw new Error("Bitte in den Betriebsdaten Gesellschafterinnen eintragen.");
@@ -472,7 +508,27 @@ function leseFormular(form) {
     entnahmeArt: art === "entnahme" ? f.entnahmeArt : null,
     eigenbelegGrund: f.ohne === "1" ? f.eigenbelegGrund : null,
     pauschale,
+    gesamtCent: anteilProzent < 100 ? gesamtCent : null,
+    anteilProzent: anteilProzent < 100 ? anteilProzent : null,
+    bewAnlass: bewirtung ? f.bewAnlass.trim() : null,
+    bewTeilnehmende: bewirtung ? f.bewTeilnehmende.trim() : null,
+    bewOrt: bewirtung ? f.bewOrt.trim() : null,
   };
+}
+
+// Duplikat- und Anlagegut-Prüfung vor dem Speichern; false = abbrechen
+function pruefeVorSpeichern(e, eigeneId) {
+  const liste = aktivData().journal.eintraege.filter((x) => !x.storniert && x.id !== eigeneId);
+  const norm = (s) => String(s || "").trim().toLowerCase();
+  const dup = liste.find(
+    (x) => (x.betragCent === e.betragCent && x.belegdatum === e.belegdatum && norm(x.partner) === norm(e.partner)) ||
+      (e.rechnungsnr && norm(x.rechnungsnr) === norm(e.rechnungsnr) && norm(x.partner) === norm(e.partner)),
+  );
+  if (dup && !confirm(`Möglicherweise doppelt erfasst:\n${dup.belegnr} · ${datumDE(dup.belegdatum)} · ${dup.partner || ""} · ${euro(dup.betragCent)}\n\nTrotzdem speichern?`)) return false;
+  const brutto = e.gesamtCent || e.betragCent;
+  if (e.art === "ausgabe" && brutto > GWG_GRENZE_BRUTTO_CENT && e.kategorie !== "Software, Abos, Lizenzen" &&
+    !confirm(`Betrag über ${euro(GWG_GRENZE_BRUTTO_CENT)} (≈ 800 € netto): Möglicherweise ein Anlagegut, das über mehrere Jahre abgeschrieben werden muss.\n\nComputer-Hardware und Software dürfen sofort voll abgesetzt werden.\n\nTrotzdem so speichern?`)) return false;
+  return true;
 }
 
 function neuerEntwurf(mode) {
@@ -552,6 +608,7 @@ async function speichereNeu(form) {
   const dat = aktivData();
   let e;
   try { e = leseFormular(form); } catch (err) { return toast(err.message, "fehler"); }
+  if (!pruefeVorSpeichern(e, null)) return;
   const d = S.draft;
   const ohne = d.mode === "ohne";
   if (!ohne && !d.pdfBlob && !d.pages.length) return toast("Bitte zuerst einen Beleg fotografieren oder wählen.", "fehler");
@@ -611,11 +668,11 @@ function renderJournal(main) {
 
   const gueltig = alle.filter((e) => !e.storniert);
   const sum = (arr) => arr.reduce((s, e) => s + e.betragCent, 0);
-  const einnahmen = sum(gueltig.filter((e) => e.art === "einnahme" && e.status === "bezahlt"));
-  const ausgaben = sum(gueltig.filter((e) => e.art === "ausgabe" && e.status === "bezahlt" && e.behandlung !== "sonderbetriebsausgabe"));
+  const r = ergebnis(d.journal, S.jahr);
   const offen = gueltig.filter((e) => e.status === "offen");
   const monate = ["01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12"];
   const monNamen = ["Jan", "Feb", "Mär", "Apr", "Mai", "Jun", "Jul", "Aug", "Sep", "Okt", "Nov", "Dez"];
+  const gbr = cfg.typ === "gbr" && (cfg.gesellschafter || []).filter((g) => g.name).length > 1;
 
   main.innerHTML = `
     <section class="card">
@@ -623,15 +680,15 @@ function renderJournal(main) {
         <h2>Journal ${esc(cfg.name)}</h2>
         <select data-act="jahr">${jahre.map((j) => opt(j, j, S.jahr)).join("")}</select>
       </div>
-      <div class="summen">
-        <div><small>Einnahmen</small><b class="plus">${euro(einnahmen)}</b></div>
-        <div><small>Ausgaben</small><b class="minus">${euro(ausgaben)}</b></div>
-        <div><small>Überschuss</small><b>${euro(einnahmen - ausgaben)}</b></div>
+      ${offen.length ? `<p class="hinweis gruen">${offen.length} offene${offen.length === 1 ? "r Posten" : " Posten"} (${euro(sum(offen))}) – zählt erst bei Zahlung.</p>` : ""}
+      ${gbr ? "" : `<div class="summen">
+        <div><small>+ Einnahmen</small><b>${euro(r.ein)}</b></div>
+        <div><small>− Ausgaben</small><b>${euro(r.aus)}</b></div>
+        <div><small>= Überschuss</small><b>${euro(r.ueberschuss)}</b></div>
       </div>
-      ${offen.length ? `<p class="hinweis">${offen.length} offene Posten (${euro(sum(offen))}) – zählen erst bei Zahlung.</p>` : ""}
-      ${cfg.typ === "gbr" ? gesellschafterBox(gueltig, cfg) : ""}
-      <p class="klein">Vorläufige Summen nach Zahlungsdatum. Die vollständige EÜR-Auswertung folgt.</p>
+      <p class="klein">Summen nach Zahlungsdatum. Die EÜR mit allen Zeilen findest du unter „Auswertung“.</p>`}
     </section>
+    ${gbr ? gbrUebersicht(d, cfg, r) : ""}
     <section class="card">
       <div class="filter">
         <select data-flt="monat">${opt("", "Alle Monate", f.monat)}${monate.map((m, i) => opt(m, monNamen[i], f.monat)).join("")}</select>
@@ -642,23 +699,56 @@ function renderJournal(main) {
     </section>`;
 }
 
-function gesellschafterBox(gueltig, cfg) {
-  const rows = (cfg.gesellschafter || []).filter((g) => g.name).map((g) => {
-    const n = g.name;
-    const s = (fn) => gueltig.filter(fn).reduce((a, e) => a + e.betragCent, 0);
-    const einlagen = s((e) => (e.art === "ausgabe" && e.bezahltVon === n && e.behandlung === "einlage") || (e.art === "einlage" && e.gesellschafterin === n));
-    const vorgestreckt = s((e) => e.art === "ausgabe" && e.bezahltVon === n && e.behandlung === "erstattung");
-    const erstattet = s((e) => e.art === "entnahme" && e.gesellschafterin === n && e.entnahmeArt === "erstattung");
-    const entnahmen = s((e) => e.art === "entnahme" && e.gesellschafterin === n && e.entnahmeArt === "privat");
-    const sba = s((e) => e.art === "ausgabe" && e.bezahltVon === n && e.behandlung === "sonderbetriebsausgabe");
-    return `<div class="gesk"><b>${esc(n)} <small>(${esc(g.anteil)} %)</small></b>
-      <div><small>Einlagen</small>${euro(einlagen)}</div>
-      <div><small>Offen zu erstatten</small>${euro(vorgestreckt - erstattet)}</div>
-      <div><small>Privatentnahmen</small>${euro(entnahmen)}</div>
-      <div><small>Sonderbetriebsausg.</small>${euro(sba)}</div></div>`;
-  });
-  if (!rows.length) return "";
-  return `<div class="gesgrid">${rows.join("")}</div>`;
+function gbrUebersicht(d, cfg, r) {
+  const ges = (cfg.gesellschafter || []).filter((g) => g.name);
+  const ein = aufteilen(r.ein, ges);
+  const aus = aufteilen(r.aus, ges);
+  const ue = aufteilen(r.ueberschuss, ges);
+  const g = gesellschafterUebersicht(d.journal, cfg, S.jahr);
+  const kopf = `<tr><td></td>${ges.map((x) => `<th>${esc(x.name)}</th>`).join("")}</tr>`;
+  const reihe = (label, werte, cls = "") => `<tr class="${cls}"><td>${label}</td>${werte.map((w) => `<td>${euro(w)}</td>`).join("")}</tr>`;
+  const ausgeglichen = g.differenz === 0;
+  return `
+    <section class="card">
+      <h2>Ergebnis ${esc(S.jahr)}</h2>
+      <div class="kennzahlen">
+        <div><small>+ Einnahmen</small><b>${euro(r.ein)}</b></div>
+        <div><small>− Ausgaben</small><b>${euro(r.aus)}</b></div>
+        <div><small>= Überschuss</small><b>${euro(r.ueberschuss)}</b></div>
+      </div>
+      <table class="uebersicht">
+        <tr><td class="klein">Aufteilung ${ges.map((x) => esc(String(x.anteil))).join("/")}</td>${ges.map((x) => `<th>${esc(x.name)}</th>`).join("")}</tr>
+        ${reihe("+ Einnahmen", ein)}
+        ${reihe("− Ausgaben", aus)}
+        ${reihe("= Überschuss", ue, "summe")}
+      </table>
+    </section>
+    <section class="card">
+      <h2>Gesellschafterinnen</h2>
+      <table class="uebersicht">
+        ${kopf}
+        ${g.hatVortrag ? reihe("Vortrag aus Vorjahren", g.personen.map((p) => p.vortrag)) : ""}
+        ${reihe("+ Einlagen", g.personen.map((p) => p.einlagen))}
+        ${reihe("− Entnahmen", g.personen.map((p) => p.entnahmen))}
+        ${reihe("= Kapitalkonto", g.personen.map((p) => p.kapital), "summe")}
+        <tr><td colspan="${ges.length + 1}" class="erl">${g.hatVortrag ? "Vortrag + " : ""}Überschussanteil + Einlagen − Entnahmen</td></tr>
+      </table>
+      <div class="ausgleich ${ausgeglichen ? "ok" : "neutral"}" data-act="ausgleich-info">
+        ${ausgeglichen ? "✓ Kapitalkonten ausgeglichen" : `Die Kapitalkonten weichen um ${euro(g.differenz)} voneinander ab.`}
+        ${ausgeglichen ? "" : `<div class="ausgleich-info" hidden>Ausgleichen lässt sich das durch eine Einlage der Gesellschafterin mit dem niedrigeren Stand oder eine Entnahme der Gesellschafterin mit dem höheren Stand. Ob und wann ihr ausgleicht, vereinbart ihr untereinander – steuerlich spielt es keine Rolle.</div>`}
+      </div>
+      <table class="uebersicht steuer">
+        ${reihe("− Sonderbetriebs&shy;ausgaben", g.personen.map((p) => p.sba))}
+        ${reihe("= Gewinnanteil (Steuer)", g.personen.map((p) => p.gewinnSteuer), "summe")}
+        <tr><td colspan="${ges.length + 1}" class="erl">Anteil am steuerlichen Gewinn − Sonderbetriebsausgaben · für die Feststellungserklärung</td></tr>
+      </table>
+    </section>`;
+}
+
+function personKlasse(name) {
+  const ges = ((aktivData() && aktivData().config.gesellschafter) || []).map((g) => g.name);
+  const i = ges.indexOf(name);
+  return i === 1 ? "p1" : "p0";
 }
 
 function zeile(e) {
@@ -666,13 +756,17 @@ function zeile(e) {
   const titel = e.partner || (e.art === "einlage" ? `Einlage ${e.gesellschafterin}` : `Entnahme ${e.gesellschafterin}`);
   const badges = [];
   if (e.storniert) badges.push(`<i class="b rot">storniert</i>`);
-  if (e.status === "offen") badges.push(`<i class="b gelb">offen</i>`);
+  if (e.status === "offen") badges.push(`<i class="b">offen</i>`);
   if (e.eigenbeleg) badges.push(`<i class="b">Eigenbeleg</i>`);
-  if (e.behandlung === "einlage") badges.push(`<i class="b blau">Einlage ${esc(e.bezahltVon)}</i>`);
-  if (e.behandlung === "erstattung") badges.push(`<i class="b blau">vorgestreckt ${esc(e.bezahltVon)}</i>`);
-  if (e.behandlung === "sonderbetriebsausgabe") badges.push(`<i class="b blau">SBA ${esc(e.bezahltVon)}</i>`);
+  if (e.anteilProzent) badges.push(`<i class="b">${String(e.anteilProzent).replace(".", ",")} %</i>`);
+  const pb = (txt, name) => badges.push(`<i class="b ${personKlasse(name)}">${esc(txt)} ${esc(name)}</i>`);
+  if (e.behandlung === "einlage") pb("Einlage", e.bezahltVon);
+  if (e.behandlung === "erstattung") pb("vorgestreckt", e.bezahltVon);
+  if (e.behandlung === "sonderbetriebsausgabe") pb("SBA", e.bezahltVon);
+  if (e.art === "einlage") pb("Einlage", e.gesellschafterin);
+  if (e.art === "entnahme") pb(e.entnahmeArt === "erstattung" ? "Erstattung" : "Entnahme", e.gesellschafterin);
   return `<li data-act="detail" data-id="${e.id}" class="${e.storniert ? "storno" : ""}">
-    <div class="l1"><span>${esc(titel)}</span><b class="${minus ? "minus" : "plus"}">${minus ? "−" : "+"}${euro(e.betragCent)}</b></div>
+    <div class="l1"><span>${esc(titel)}</span><b><i class="punkt ${minus ? "aus" : "ein"}"></i>${minus ? "−" : "+"}${euro(e.betragCent)}</b></div>
     <div class="l2"><span>${datumDE(e.zahlungsdatum || e.belegdatum)} · ${esc(e.belegnr)} · ${esc(e.kategorie || (e.art === "einlage" ? "Einlage" : "Entnahme"))}</span>${badges.join("")}</div>
   </li>`;
 }
@@ -685,13 +779,14 @@ function zeigeDetail(id) {
   modal(`
     <div class="kopf"><h2>${esc(e.belegnr)} · ${artText}</h2><button class="link" data-act="modal-zu">Schließen</button></div>
     <table class="detail">
-      ${reihe("Betrag", euro(e.betragCent))}
+      ${reihe("Betrag", euro(e.betragCent) + (e.anteilProzent ? `<br><small>${String(e.anteilProzent).replace(".", ",")} % von ${euro(e.gesamtCent)}</small>` : ""))}
       ${reihe("Belegdatum", datumDE(e.belegdatum))}
       ${reihe("Status", e.status === "bezahlt" ? `bezahlt am ${datumDE(e.zahlungsdatum)}` : "offen")}
       ${reihe(e.art === "einnahme" ? "Kunde" : "Lieferant", esc(e.partner))}
       ${reihe("Gesellschafterin", esc(e.gesellschafterin))}
       ${reihe("Kategorie", esc(e.kategorie))}
       ${reihe("Beschreibung", esc(e.beschreibung))}
+      ${e.bewAnlass ? reihe("Bewirtung", `Anlass: ${esc(e.bewAnlass)}<br>Teilnehmende: ${esc(e.bewTeilnehmende)}<br>Ort: ${esc(e.bewOrt)}`) : ""}
       ${reihe("Rechnungs-Nr.", esc(e.rechnungsnr))}
       ${reihe("Bezahlt von", e.bezahltVon && e.bezahltVon !== "betrieb" ? esc(e.bezahltVon) + " privat" : "")}
       ${reihe("Behandlung", esc({ einlage: "Einlage", erstattung: "wird erstattet", sonderbetriebsausgabe: "Sonderbetriebsausgabe" }[e.behandlung] || ""))}
@@ -724,6 +819,7 @@ async function speichereBearbeitung(form) {
   const id = form.dataset.editId;
   let neu;
   try { neu = leseFormular(form); } catch (err) { return toast(err.message, "fehler"); }
+  if (!pruefeVorSpeichern(neu, id)) return;
   busy("Speichere Änderungen …");
   try {
     const alt = await updateJournal(b, (j) => {
@@ -777,6 +873,304 @@ async function storniere(id) {
 }
 
 // ---------------------------------------------------------------------------
+// Auswertung (EÜR)
+// ---------------------------------------------------------------------------
+function jahreListe(d) {
+  return [...new Set([String(new Date().getFullYear()), ...d.journal.eintraege.map(zahlJahr)])].filter(Boolean).sort().reverse();
+}
+
+function pruefhinweise(d, eu) {
+  const j = S.jahr;
+  const hin = [];
+  const im = d.journal.eintraege.filter((e) => !e.storniert);
+  const offen = im.filter((e) => e.status === "offen" && (e.belegdatum || "").startsWith(j));
+  if (offen.length) hin.push(["warn", `${offen.length} offene${offen.length === 1 ? "r Posten" : " Posten"} aus ${j} (${euro(offen.reduce((s, e) => s + e.betragCent, 0))}) – zählen erst, wenn sie bezahlt sind.`]);
+  const bew = im.filter((e) => e.kategorie === "Bewirtung" && zahlJahr(e) === j && !(e.bewAnlass && e.bewTeilnehmende));
+  if (bew.length) hin.push(["warn", `${bew.length} Bewirtung${bew.length === 1 ? "" : "en"} ohne Anlass oder Teilnehmende – ohne diese Angaben erkennt das Finanzamt den Abzug nicht an.`]);
+  const ho = eu.zeilen.find((z) => z.id === "ho");
+  if (ho && ho.brutto > HOMEOFFICE_MAX_CENT) hin.push(["fehler", `Homeoffice-Pauschale ${euro(ho.brutto)} – höchstens ${euro(HOMEOFFICE_MAX_CENT)} im Jahr sind abziehbar.`]);
+  if (d.config.kleinunternehmer !== false) {
+    const vorjahr = euer(d.journal, String(Number(j) - 1)).be;
+    if (eu.be > KU_GRENZE_LAUFEND_CENT) hin.push(["fehler", `Einnahmen über ${euro(KU_GRENZE_LAUFEND_CENT)} – die Kleinunternehmerregelung entfällt ab dem Umsatz, der die Grenze überschreitet. Bitte steuerlich beraten lassen.`]);
+    else if (eu.be > KU_GRENZE_VORJAHR_CENT) hin.push(["warn", `Einnahmen ${j} über ${euro(KU_GRENZE_VORJAHR_CENT)} – ab ${Number(j) + 1} gilt die Kleinunternehmerregelung voraussichtlich nicht mehr.`]);
+    else if (eu.be > KU_GRENZE_VORJAHR_CENT * 0.8) hin.push(["info", `Einnahmen ${euro(eu.be)} – nahe an der Kleinunternehmer-Grenze von ${euro(KU_GRENZE_VORJAHR_CENT)}.`]);
+    if (vorjahr > KU_GRENZE_VORJAHR_CENT) hin.push(["warn", `Einnahmen ${Number(j) - 1} lagen über ${euro(KU_GRENZE_VORJAHR_CENT)} – Kleinunternehmerregelung für ${j} prüfen.`]);
+  }
+  if (eu.ohneZuordnung.length) hin.push(["warn", `${eu.ohneZuordnung.length} Buchung${eu.ohneZuordnung.length === 1 ? "" : "en"} ohne gültige Kategorie – bitte im Journal bearbeiten.`]);
+  return hin;
+}
+
+function renderAuswertung(main) {
+  const d = aktivData();
+  const cfg = d.config;
+  const eu = euer(d.journal, S.jahr);
+  const hin = pruefhinweise(d, eu);
+  const gbr = cfg.typ === "gbr" && (cfg.gesellschafter || []).filter((g) => g.name).length > 1;
+  const g = gbr ? gesellschafterUebersicht(d.journal, cfg, S.jahr) : null;
+  const zeileHtml = (z) => `<tr data-act="euer-zeile" data-id="${z.id}" class="klick">
+      <td class="z">${esc(z.zeile || "–")}</td>
+      <td>${esc(z.bez)}${z.nichtAbziehbar ? `<br><small>gesamt ${euro(z.brutto)}, davon nicht abziehbar ${euro(z.nichtAbziehbar)}</small>` : ""}</td>
+      <td class="bt">${euro(z.betrag)}</td></tr>`;
+  const ein = eu.zeilen.filter((z) => z.typ === "einnahme" && z.brutto);
+  const aus = eu.zeilen.filter((z) => z.typ === "ausgabe" && z.brutto);
+  main.innerHTML = `
+    <section class="card">
+      <div class="kopf"><h2>EÜR ${esc(cfg.name)}</h2><select data-act="jahr">${jahreListe(d).map((j) => opt(j, j, S.jahr)).join("")}</select></div>
+      ${hin.length ? hin.map(([t, txt]) => `<p class="hinweis ${t === "fehler" ? "rotf" : t === "info" ? "gruen" : "neutral"}">${esc(txt)}</p>`).join("") : `<p class="hinweis gruen">✓ Keine Auffälligkeiten für ${esc(S.jahr)}</p>`}
+    </section>
+    <section class="card">
+      <table class="euer">
+        <tr><th class="z">Zeile</th><th>Betriebseinnahmen</th><th class="bt">Betrag</th></tr>
+        ${ein.map(zeileHtml).join("") || `<tr><td></td><td class="leer">Keine Einnahmen</td><td></td></tr>`}
+        <tr class="summe"><td class="z">23</td><td>Summe Betriebseinnahmen</td><td class="bt">${euro(eu.be)}</td></tr>
+        <tr><th class="z">Zeile</th><th>Betriebsausgaben</th><th class="bt"></th></tr>
+        ${aus.map(zeileHtml).join("") || `<tr><td></td><td class="leer">Keine Ausgaben</td><td></td></tr>`}
+        <tr class="summe"><td class="z"></td><td>Summe Betriebsausgaben</td><td class="bt">${euro(eu.ba)}</td></tr>
+        <tr class="gewinn"><td class="z"></td><td>${eu.gewinn >= 0 ? "Gewinn" : "Verlust"}</td><td class="bt">${euro(eu.gewinn)}</td></tr>
+      </table>
+      <p class="klein">Zeile antippen zeigt die Buchungen. Zeilennummern laut Vordruck 2026, soweit eindeutig belegt – maßgeblich ist die Bezeichnung im Steuerprogramm.${gbr ? " Sonderbetriebsausgaben sind hier nicht enthalten, sie gehören zur jeweiligen Gesellschafterin." : ""}</p>
+    </section>
+    ${gbr ? `<section class="card">
+      <h2>Für die Feststellungserklärung</h2>
+      <table class="uebersicht">
+        <tr><td></td>${g.personen.map((p) => `<th>${esc(p.name)}</th>`).join("")}</tr>
+        <tr><td>Anteil am Gewinn</td>${g.personen.map((p) => `<td>${euro(p.gewinnSteuer + p.sba)}</td>`).join("")}</tr>
+        <tr><td>− Sonderbetriebs&shy;ausgaben</td>${g.personen.map((p) => `<td>${euro(p.sba)}</td>`).join("")}</tr>
+        <tr class="summe"><td>= Gewinnanteil</td>${g.personen.map((p) => `<td>${euro(p.gewinnSteuer)}</td>`).join("")}</tr>
+        <tr><td colspan="${g.personen.length + 1}" class="erl">Informativ, ohne steuerliche Wirkung:</td></tr>
+        <tr><td>Einlagen</td>${g.personen.map((p) => `<td>${euro(p.einlagen)}</td>`).join("")}</tr>
+        <tr><td>Entnahmen</td>${g.personen.map((p) => `<td>${euro(p.entnahmen)}</td>`).join("")}</tr>
+      </table>
+    </section>` : ""}
+    <section class="card">
+      <button class="primary big" data-act="euer-pdf">PDF „EÜR ${esc(S.jahr)}“ erstellen</button>
+      <p class="klein">Das PDF wird im Betriebsordner unter „Auswertungen“ abgelegt und enthält die EÜR${gbr ? ", die Werte für die Feststellungserklärung" : ""} und die Belegliste.</p>
+    </section>`;
+}
+
+function zeigeEuerZeile(id) {
+  const eu = euer(aktivData().journal, S.jahr);
+  const z = eu.zeilen.find((x) => x.id === id);
+  if (!z) return;
+  modal(`
+    <div class="kopf"><h2>${esc(z.zeile ? "Zeile " + z.zeile : z.bez)}</h2><button class="link" data-act="modal-zu">Schließen</button></div>
+    <p>${esc(z.bez)} · ${euro(z.brutto)}${z.nichtAbziehbar ? ` (abziehbar ${euro(z.betrag)})` : ""}</p>
+    <ul class="liste">${z.eintraege.map(zeile).join("")}</ul>`);
+}
+
+async function euerExport() {
+  const b = aktiv();
+  const d = aktivData();
+  const cfg = d.config;
+  const gbr = cfg.typ === "gbr" && (cfg.gesellschafter || []).filter((g) => g.name).length > 1;
+  busy("Erstelle PDF …");
+  try {
+    const eu = euer(d.journal, S.jahr);
+    const eintraege = d.journal.eintraege
+      .filter((e) => !e.storniert && e.status === "bezahlt" && zahlJahr(e) === S.jahr)
+      .sort((a, b2) => (a.belegnr || "").localeCompare(b2.belegnr || ""));
+    const blob = euerPdf({ config: cfg, jahr: S.jahr, eu, gesellschaft: gbr ? gesellschafterUebersicht(d.journal, cfg, S.jahr) : null, eintraege, ersteller: ichBin() });
+    busy("Lege PDF in OneDrive ab …");
+    const ordner = await G.ensurePath(b.driveId, b.itemId, ["Auswertungen"]);
+    const name = `EUER_${S.jahr}_${cfg.kurz}.pdf`;
+    const item = await G.uploadFile(b.driveId, ordner, name, blob, { overwrite: true });
+    busy(null);
+    const datei = new File([blob], name, { type: "application/pdf" });
+    const teilbar = navigator.canShare && navigator.canShare({ files: [datei] });
+    modal(`
+      <div class="kopf"><h2>PDF erstellt</h2><button class="link" data-act="modal-zu">Fertig</button></div>
+      <p>„${esc(name)}“ liegt im Betriebsordner unter „Auswertungen“.</p>
+      <div class="aktionen">
+        ${item && item.webUrl ? `<a class="primary btn" href="${esc(item.webUrl)}" target="_blank" rel="noopener">PDF öffnen</a>` : ""}
+        ${teilbar ? `<button class="sekundaer" data-act="pdf-teilen">Teilen …</button>` : ""}
+      </div>`);
+    S.letztesPdf = datei;
+  } catch (e) { fehler(e); }
+}
+
+// ---------------------------------------------------------------------------
+// Wiederkehrende Buchungen
+// ---------------------------------------------------------------------------
+const RHYTHMUS = { monatlich: "monatlich", vierteljaehrlich: "vierteljährlich", jaehrlich: "jährlich" };
+const MONATE = ["Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August", "September", "Oktober", "November", "Dezember"];
+const periodeText = (p) => `${MONATE[Number(p.slice(5, 7)) - 1]} ${p.slice(0, 4)}`;
+
+async function updateVorlagen(b, mutate) {
+  for (let i = 0; i < 4; i++) {
+    const jr = await G.readJson(b.driveId, b.itemId, VORLAGEN_FILE);
+    const data = jr.data || { version: 1, vorlagen: [] };
+    const res = mutate(data);
+    try {
+      const item = await G.writeJson(b.driveId, b.itemId, VORLAGEN_FILE, data, jr.etag);
+      S.data[b.key].vorlagen = data.vorlagen;
+      S.data[b.key].vorlagenEtag = item && item.eTag;
+      return res;
+    } catch (e) {
+      if (e.status === 412) continue;
+      throw e;
+    }
+  }
+  throw new Error("Die Vorlagen wurden gleichzeitig geändert. Bitte noch einmal speichern.");
+}
+
+function zeigeVorlagen(b) {
+  const d = S.data[b.key];
+  const liste = d.vorlagen || [];
+  modal(`
+    <div class="kopf"><h2>Wiederkehrende Buchungen</h2><button class="link" data-act="modal-zu">Schließen</button></div>
+    <p class="klein">Für Anteile aus privaten Rechnungen, z. B. Handy oder Internet. Die App fragt beim Öffnen nach, bevor sie fällige Buchungen anlegt.</p>
+    ${liste.length ? `<ul class="betriebe">${liste.map((v) => {
+      const f = faelligePerioden(v, heute());
+      return `<li><div><b>${esc(v.bezeichnung)}</b>
+        <small>${euro(Math.round((v.gesamtCent * v.anteil) / 100))} ${RHYTHMUS[v.rhythmus]} (${String(v.anteil).replace(".", ",")} % von ${euro(v.gesamtCent)}) · ${esc(v.kategorie)}${v.behandlung === "sonderbetriebsausgabe" ? ` · SBA ${esc(v.bezahltVon)}` : ""}</small>
+        <small>ab ${periodeText(v.start)}${v.ende ? ` bis ${periodeText(v.ende)}` : ""}${f.length ? ` · ${f.length} fällig` : ""}</small></div>
+        <div class="knoepfe"><button class="link" data-act="vorlage-edit" data-key="${b.key}" data-id="${v.id}">Bearbeiten</button>
+        <button class="link rot" data-act="vorlage-weg" data-key="${b.key}" data-id="${v.id}">Löschen</button></div></li>`;
+    }).join("")}</ul>` : `<p class="leer">Noch keine Vorlagen.</p>`}
+    <div class="aktionen"><button class="primary" data-act="vorlage-neu" data-key="${b.key}">＋ Neue Vorlage</button>
+    ${liste.some((v) => faelligePerioden(v, heute()).length) ? `<button class="sekundaer" data-act="faellige" data-key="${b.key}">Fällige jetzt prüfen</button>` : ""}</div>`);
+}
+
+function zeigeVorlageForm(b, id) {
+  const d = S.data[b.key];
+  const cfg = d.config;
+  const gbr = cfg.typ === "gbr";
+  const ges = (cfg.gesellschafter || []).map((g) => g.name).filter(Boolean);
+  const v = (d.vorlagen || []).find((x) => x.id === id) || { rhythmus: "monatlich", start: heute().slice(0, 7), tag: 1, anteil: 100, kategorie: "Telefon, Internet (anteilig)", bezahltVon: gbr ? ges[0] : null, behandlung: gbr ? "sonderbetriebsausgabe" : null };
+  modal(`
+    <div class="kopf"><h2>${id ? "Vorlage bearbeiten" : "Neue Vorlage"}</h2><button class="link" data-act="vorlagen" data-key="${b.key}">Zurück</button></div>
+    <form id="vorlageform">
+      <label>Bezeichnung<input name="bezeichnung" value="${esc(v.bezeichnung || "")}" placeholder="z. B. Handy betrieblicher Anteil" required></label>
+      <label>Anbieter<input name="partner" value="${esc(v.partner || "")}" placeholder="z. B. Telekom" required></label>
+      <label>Kategorie<select name="kategorie">${KATEGORIEN_AUSGABE.map((k) => opt(k, k, v.kategorie)).join("")}</select></label>
+      <div class="zwei">
+        <label>Rechnungsbetrag (€)<input name="gesamt" inputmode="decimal" value="${v.gesamtCent ? betragText(v.gesamtCent) : ""}" required></label>
+        <label>Betrieblicher Anteil (%)<input name="anteil" inputmode="decimal" value="${esc(v.anteil)}" required></label>
+      </div>
+      <div class="zwei">
+        <label>Rhythmus<select name="rhythmus">${Object.entries(RHYTHMUS).map(([k, l]) => opt(k, l, v.rhythmus)).join("")}</select></label>
+        <label>Buchungstag im Monat<input name="tag" type="number" min="1" max="28" value="${esc(v.tag)}"></label>
+      </div>
+      <div class="zwei">
+        <label>Ab (Monat)<input name="start" type="month" value="${esc(v.start)}" required></label>
+        <label>Bis (optional)<input name="ende" type="month" value="${esc(v.ende || "")}"></label>
+      </div>
+      ${gbr ? `<label>Bezahlt von<select name="bezahltVon">${opt("betrieb", "GbR-Konto", v.bezahltVon || "betrieb")}${ges.map((n) => opt(n, `${n} privat`, v.bezahltVon)).join("")}</select></label>
+      <label>Behandlung<select name="behandlung">${opt("sonderbetriebsausgabe", "Sonderbetriebsausgabe (trägt sie allein)", v.behandlung)}${opt("einlage", "Einlage", v.behandlung)}${opt("erstattung", "Wird vom GbR-Konto erstattet", v.behandlung)}</select></label>` : ""}
+      <p class="klein">Jede fällige Buchung bekommt automatisch einen Eigenbeleg. Hast du die private Rechnung, kannst du sie zusätzlich im Betriebsordner ablegen.</p>
+      <div class="aktionen"><button type="submit" class="primary big">Speichern</button></div>
+    </form>`);
+  modalEl.querySelector("#vorlageform").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const f = Object.fromEntries(new FormData(ev.target).entries());
+    const gesamtCent = parseBetrag(f.gesamt);
+    const anteil = parseFloat(String(f.anteil).replace(",", "."));
+    if (!(gesamtCent > 0)) return toast("Bitte einen gültigen Betrag angeben.", "fehler");
+    if (!(anteil > 0 && anteil <= 100)) return toast("Der Anteil muss zwischen 1 und 100 % liegen.", "fehler");
+    if (f.ende && f.ende < f.start) return toast("„Bis“ liegt vor „Ab“.", "fehler");
+    const neu = {
+      id: id || uuid(), bezeichnung: f.bezeichnung.trim(), partner: f.partner.trim(), kategorie: f.kategorie,
+      gesamtCent, anteil, rhythmus: f.rhythmus, tag: Math.min(28, Math.max(1, parseInt(f.tag, 10) || 1)),
+      start: f.start, ende: f.ende || null,
+      bezahltVon: gbr ? f.bezahltVon : null,
+      behandlung: gbr && f.bezahltVon !== "betrieb" ? f.behandlung : null,
+    };
+    busy("Speichere Vorlage …");
+    try {
+      await updateVorlagen(b, (data) => {
+        const alt = data.vorlagen.find((x) => x.id === neu.id);
+        if (alt) Object.assign(alt, neu, { erledigt: alt.erledigt || [] });
+        else data.vorlagen.push({ ...neu, erledigt: [], angelegtVon: ichBin(), angelegtAm: new Date().toISOString() });
+      });
+      busy(null);
+      toast("Vorlage gespeichert");
+      zeigeVorlagen(b);
+    } catch (e) { fehler(e); }
+  });
+}
+
+function faelligeListe(b) {
+  const d = S.data[b.key];
+  return (d.vorlagen || []).flatMap((v) => faelligePerioden(v, heute()).map((p) => ({ v, p })));
+}
+
+function zeigeFaellige(b) {
+  const f = faelligeListe(b);
+  if (!f.length) { closeModal(); return toast("Keine fälligen Buchungen."); }
+  modal(`
+    <div class="kopf"><h2>${f.length} Buchung${f.length === 1 ? "" : "en"} fällig</h2><button class="link" data-act="modal-zu">Später</button></div>
+    <p class="klein">${esc(S.data[b.key].config.name)} · Wiederkehrende Buchungen</p>
+    <form id="faelligform">
+      <ul class="faellig">${f.map((x, i) => `<li><label class="check"><input type="checkbox" name="f${i}" checked>
+        <span><b>${esc(x.v.bezeichnung)}</b> · ${periodeText(x.p)}<br><small>${euro(Math.round((x.v.gesamtCent * x.v.anteil) / 100))}${x.v.behandlung === "sonderbetriebsausgabe" ? ` · SBA ${esc(x.v.bezahltVon)}` : ""}</small></span></label></li>`).join("")}</ul>
+      <div class="aktionen">
+        <button type="submit" class="primary" name="aktion" value="anlegen">Ausgewählte anlegen</button>
+        <button type="submit" class="sekundaer" name="aktion" value="ueberspringen">Ausgewählte überspringen</button>
+      </div>
+    </form>`);
+  modalEl.querySelector("#faelligform").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const aktion = ev.submitter && ev.submitter.value;
+    const gewaehlt = f.filter((_, i) => ev.target[`f${i}`].checked);
+    if (!gewaehlt.length) return toast("Nichts ausgewählt.", "fehler");
+    if (aktion === "ueberspringen" && !confirm(`${gewaehlt.length} Buchung(en) überspringen? Sie werden danach nicht mehr vorgeschlagen.`)) return;
+    try {
+      if (aktion === "anlegen") await faelligeAnlegen(b, gewaehlt);
+      await updateVorlagen(b, (data) => {
+        for (const x of gewaehlt) {
+          const v = data.vorlagen.find((y) => y.id === x.v.id);
+          if (v) v.erledigt = [...new Set([...(v.erledigt || []), x.p])];
+        }
+      });
+      busy(null);
+      closeModal();
+      toast(aktion === "anlegen" ? `${gewaehlt.length} Buchung(en) angelegt` : "Übersprungen");
+      render();
+    } catch (e) { fehler(e); }
+  });
+}
+
+async function faelligeAnlegen(b, liste) {
+  const d = S.data[b.key];
+  let n = 0;
+  for (const { v, p } of liste) {
+    n++;
+    busy(`Lege Buchung ${n} von ${liste.length} an …`);
+    const datum = `${p}-${String(v.tag || 1).padStart(2, "0")}`;
+    const e = {
+      id: uuid(), art: "ausgabe", belegdatum: datum, zahlungsdatum: datum, status: "bezahlt",
+      betragCent: Math.round((v.gesamtCent * v.anteil) / 100),
+      gesamtCent: v.anteil < 100 ? v.gesamtCent : null, anteilProzent: v.anteil < 100 ? v.anteil : null,
+      partner: v.partner, kategorie: v.kategorie, beschreibung: `${v.bezeichnung} ${periodeText(p)}`, rechnungsnr: "",
+      bezahltVon: v.bezahltVon, behandlung: v.behandlung, gesellschafterin: "", entnahmeArt: null,
+      eigenbeleg: true, eigenbelegGrund: "Wiederkehrende Buchung (Anteil aus privater Rechnung)", pauschale: null,
+      vorlageId: v.id, periode: p, erfasstVon: ichBin(), erfasstAm: new Date().toISOString(), storniert: false, historie: [],
+    };
+    const jahr = datum.slice(0, 4);
+    e.belegnr = naechsteBelegnr(d.journal, jahr);
+    const blob = eigenbelegPdf(e, d.config, ichBin());
+    const ordner = await G.ensurePath(b.driveId, b.itemId, [BELEGE_FOLDER, jahr]);
+    const item = await G.uploadFile(b.driveId, ordner, dateiname(e, d.config.kurz), blob);
+    e.datei = { id: item.id, name: item.name, webUrl: item.webUrl, driveId: b.driveId };
+    await updateJournal(b, (j) => {
+      if (j.eintraege.some((x) => x.vorlageId === v.id && x.periode === p && !x.storniert)) return; // schon angelegt
+      if (j.eintraege.some((x) => x.belegnr === e.belegnr)) e.belegnr = naechsteBelegnr(j, jahr);
+      j.eintraege.push(e);
+    });
+  }
+  busy("Aktualisiere Excel-Kopie …");
+  await excelSpiegeln(b);
+}
+
+const faelligGeprueft = new Set();
+function pruefeFaelligBeimOeffnen() {
+  const b = aktiv();
+  if (!b || faelligGeprueft.has(b.key) || !S.data[b.key]) return;
+  faelligGeprueft.add(b.key);
+  if (faelligeListe(b).length) zeigeFaellige(b);
+}
+
+// ---------------------------------------------------------------------------
 // Einstellungen
 // ---------------------------------------------------------------------------
 function renderEinstellungen(main) {
@@ -795,6 +1189,7 @@ function renderEinstellungen(main) {
           <div class="knoepfe">
           ${admin ? `<button class="link" data-act="cfg" data-key="${b.key}">Betriebsdaten</button>
           <button class="link" data-act="personen" data-key="${b.key}">Personen freischalten</button>` : ""}
+          <button class="link" data-act="vorlagen" data-key="${b.key}">Wiederkehrende Buchungen</button>
           <button class="link rot" data-act="trennen" data-key="${b.key}">Trennen</button></div></li>`;
       }).join("")}</ul>`
         : `<p>Noch kein Betrieb verbunden.</p>`}
@@ -1102,7 +1497,7 @@ document.addEventListener("click", async (ev) => {
         if (S.draft && !confirm("Der angefangene Beleg wird verworfen. Fortfahren?")) return;
         S.draft = null; S.queue = [];
         S.active = el.dataset.key; speichereBetriebe();
-        busy("Lade …"); await ladeBetrieb(aktiv(), true); busy(null); render(); break;
+        busy("Lade …"); await ladeBetrieb(aktiv(), true); busy(null); render(); pruefeFaelligBeimOeffnen(); break;
       case "foto": camInput.click(); break;
       case "datei": dateiInput.click(); break;
       case "ohne": neuerEntwurf("ohne"); render(); break;
@@ -1146,6 +1541,21 @@ document.addEventListener("click", async (ev) => {
         speichereBetriebe(); await speichereVerbindungen(); render(); break;
       }
       case "personen": await zeigePersonen(S.betriebe.find((x) => x.key === el.dataset.key)); break;
+      case "ausgleich-info": { const i = el.querySelector(".ausgleich-info"); if (i) i.hidden = !i.hidden; break; }
+      case "euer-zeile": zeigeEuerZeile(el.dataset.id); break;
+      case "euer-pdf": await euerExport(); break;
+      case "pdf-teilen": try { await navigator.share({ files: [S.letztesPdf], title: S.letztesPdf.name }); } catch (_) {} break;
+      case "vorlagen": { const b = S.betriebe.find((x) => x.key === el.dataset.key); busy("Lade …"); await ladeBetrieb(b, true); busy(null); zeigeVorlagen(b); break; }
+      case "vorlage-neu": zeigeVorlageForm(S.betriebe.find((x) => x.key === el.dataset.key), null); break;
+      case "vorlage-edit": zeigeVorlageForm(S.betriebe.find((x) => x.key === el.dataset.key), el.dataset.id); break;
+      case "vorlage-weg": {
+        const b = S.betriebe.find((x) => x.key === el.dataset.key);
+        if (!confirm("Vorlage löschen? Bereits angelegte Buchungen bleiben erhalten.")) return;
+        busy("Lösche …");
+        await updateVorlagen(b, (data) => { data.vorlagen = data.vorlagen.filter((v) => v.id !== el.dataset.id); });
+        busy(null); zeigeVorlagen(b); break;
+      }
+      case "faellige": zeigeFaellige(S.betriebe.find((x) => x.key === el.dataset.key)); break;
       case "perm-weg": await entfernePerm(S.betriebe.find((x) => x.key === el.dataset.key), el.dataset.id); break;
       case "nur-link": {
         const b = S.betriebe.find((x) => x.key === el.dataset.key);
@@ -1198,4 +1608,5 @@ document.addEventListener("click", async (ev) => {
   }
   render();
   if (S.account && ls.get("sk_einladung", null)) await einladungAnnehmen();
+  else if (S.account) pruefeFaelligBeimOeffnen();
 })();
