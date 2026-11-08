@@ -12,7 +12,7 @@ shutil.copy(os.path.join(ROOT, "test", "mock-graph.js"), os.path.join(T, "src", 
 subprocess.run(["npx", "esbuild", os.path.join(T, "src", "main.js"), "--bundle", "--format=iife",
                 "--outfile=" + os.path.join(T, "app.js"), "--log-level=warning"], check=True, cwd=ROOT)
 with open(os.path.join(T, "index.html")) as fh:
-    html = fh.read().replace("app.js?v=1.2.0", "app.js")
+    html = fh.read().replace("app.js?v=1.2.1", "app.js")
 open(os.path.join(T, "index.html"), "w").write(html)
 
 srv = subprocess.Popen([sys.executable, "-m", "http.server", "8765", "--directory", T], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -102,17 +102,17 @@ with sync_playwright() as p:
     page.click("button:has-text('Ausgewählte anlegen')"); page.wait_for_timeout(2500)
 
     # GbR
-    verbinde(["Steuer", "Schuhkarton_Steuer", "regulationwiseGbR"], "regulation.wise GbR", "GbR", "gbr", ["Elizabeth", "Janina"])
+    verbinde(["Steuer", "Schuhkarton_Steuer", "regulationwiseGbR"], "regulation.wise GbR", "GbR", "gbr", ["Elizabeth Zimmermann", "Janina Ihbe"])
     ohne("einnahme", "1200", "Kunde Workshop", "Betriebseinnahmen (Kleinunternehmer)")
-    def priv_el(): page.select_option("select[name=bezahltVon]", "Elizabeth")
+    def priv_el(): page.select_option("select[name=bezahltVon]", "Elizabeth Zimmermann")
     ohne("ausgabe", "130,36", "Adobe", "Software, Abos, Lizenzen", "", priv_el)
     def sba():
-        page.select_option("select[name=bezahltVon]", "Elizabeth"); page.select_option("select[name=behandlung]", "sonderbetriebsausgabe")
+        page.select_option("select[name=bezahltVon]", "Elizabeth Zimmermann"); page.select_option("select[name=behandlung]", "sonderbetriebsausgabe")
     ohne("ausgabe", "48", "Telekom", "Telefon, Internet (anteilig)", "Handy GbR-Anteil", sba)
     ohne("ausgabe", "55,59", "Druckerei", "Werbung, Website, Hosting")
-    def ent_el(): page.select_option("select[name=gesellschafterin]", "Elizabeth"); page.select_option("select[name=entnahmeArt]", "privat")
+    def ent_el(): page.select_option("select[name=gesellschafterin]", "Elizabeth Zimmermann"); page.select_option("select[name=entnahmeArt]", "privat")
     ohne("entnahme", "330,36", "", None, "Entnahme", ent_el)
-    def ent_ja(): page.select_option("select[name=gesellschafterin]", "Janina"); page.select_option("select[name=entnahmeArt]", "privat")
+    def ent_ja(): page.select_option("select[name=gesellschafterin]", "Janina Ihbe"); page.select_option("select[name=entnahmeArt]", "privat")
     ohne("entnahme", "100", "", None, "Entnahme", ent_ja)
     page.click("nav >> text=Journal"); page.wait_for_timeout(300)
     page.screenshot(path=f"{SHOT}/07-journal-gbr.png", full_page=True)

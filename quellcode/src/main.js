@@ -705,9 +705,9 @@ function gbrUebersicht(d, cfg, r) {
   const aus = aufteilen(r.aus, ges);
   const ue = aufteilen(r.ueberschuss, ges);
   const g = gesellschafterUebersicht(d.journal, cfg, S.jahr);
-  const kopf = `<tr><td></td>${ges.map((x) => `<th>${esc(x.name)}</th>`).join("")}</tr>`;
+  const kopf = `<tr><td></td>${ges.map((x) => `<th>${esc(vorname(x.name))}</th>`).join("")}</tr>`;
   const reihe = (label, werte, cls = "") => `<tr class="${cls}"><td>${label}</td>${werte.map((w) => `<td>${euro(w)}</td>`).join("")}</tr>`;
-  const ausgeglichen = g.differenz === 0;
+  const ausgeglichen = g.ausgeglichen;
   return `
     <section class="card">
       <h2>Ergebnis ${esc(S.jahr)}</h2>
@@ -717,7 +717,7 @@ function gbrUebersicht(d, cfg, r) {
         <div><small>= Überschuss</small><b>${euro(r.ueberschuss)}</b></div>
       </div>
       <table class="uebersicht">
-        <tr><td class="klein">Aufteilung ${ges.map((x) => esc(String(x.anteil))).join("/")}</td>${ges.map((x) => `<th>${esc(x.name)}</th>`).join("")}</tr>
+        <tr><td class="klein">Aufteilung ${ges.map((x) => esc(String(x.anteil))).join("/")}</td>${ges.map((x) => `<th>${esc(vorname(x.name))}</th>`).join("")}</tr>
         ${reihe("+ Einnahmen", ein)}
         ${reihe("− Ausgaben", aus)}
         ${reihe("= Überschuss", ue, "summe")}
@@ -744,6 +744,8 @@ function gbrUebersicht(d, cfg, r) {
       </table>
     </section>`;
 }
+
+const vorname = (name) => String(name || "").trim().split(/\s+/)[0];
 
 function personKlasse(name) {
   const ges = ((aktivData() && aktivData().config.gesellschafter) || []).map((g) => g.name);
@@ -933,7 +935,7 @@ function renderAuswertung(main) {
     ${gbr ? `<section class="card">
       <h2>Für die Feststellungserklärung</h2>
       <table class="uebersicht">
-        <tr><td></td>${g.personen.map((p) => `<th>${esc(p.name)}</th>`).join("")}</tr>
+        <tr><td></td>${g.personen.map((p) => `<th>${esc(vorname(p.name))}</th>`).join("")}</tr>
         <tr><td>Anteil am Gewinn</td>${g.personen.map((p) => `<td>${euro(p.gewinnSteuer + p.sba)}</td>`).join("")}</tr>
         <tr><td>− Sonderbetriebs&shy;ausgaben</td>${g.personen.map((p) => `<td>${euro(p.sba)}</td>`).join("")}</tr>
         <tr class="summe"><td>= Gewinnanteil</td>${g.personen.map((p) => `<td>${euro(p.gewinnSteuer)}</td>`).join("")}</tr>

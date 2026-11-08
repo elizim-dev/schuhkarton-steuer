@@ -53,7 +53,7 @@ small { color: var(--leise); }
   flex: 1 0 auto; border: 1px solid var(--linie); background: var(--karte); color: var(--text);
   padding: 8px 12px; border-radius: 999px; font-size: .92rem; white-space: nowrap;
 }
-.seg button.on { background: var(--lila); border-color: var(--lila); color: var(--text); font-weight: 600; }
+.seg button.on { background: var(--gruen); border-color: var(--gruen); color: var(--text); font-weight: 600; }
 
 main { padding: 12px; max-width: 720px; margin: 0 auto; }
 .card { background: var(--karte); border: 1px solid var(--linie); border-radius: var(--radius); padding: 16px; margin-bottom: 12px; }

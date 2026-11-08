@@ -86,7 +86,9 @@ export function gesellschafterUebersicht(journal, config, jahr) {
   }));
   const kap = personen.map((p) => p.kapital);
   const differenz = kap.length > 1 ? Math.max(...kap) - Math.min(...kap) : 0;
-  return { personen, differenz, hatVortrag: vortrag.some((v) => v !== 0) };
+  // Rundung bei der Gewinnaufteilung: höchstens 1 Cent je einbezogenem Jahr
+  const rundungsToleranz = 1 + jahreBis(jahr).length;
+  return { personen, differenz, ausgeglichen: differenz <= rundungsToleranz, hatVortrag: vortrag.some((v) => v !== 0) };
 }
 
 // Fällige Perioden einer wiederkehrenden Buchung bis heute
