@@ -3,12 +3,12 @@ import {
   VERSION, CONFIG_FILE, JOURNAL_FILE, BELEGE_FOLDER, KI_MODELLE, KI_STANDARD, VERBINDUNGEN_FILE, REDIRECT_URI,
   KATEGORIEN_AUSGABE, KATEGORIEN_EINNAHME, EIGENBELEG_GRUENDE,
   KM_PAUSCHALE_CENT, HOMEOFFICE_TAG_CENT, HOMEOFFICE_MAX_CENT,
-  GWG_GRENZE_BRUTTO_CENT, KU_GRENZE_VORJAHR_CENT, KU_GRENZE_LAUFEND_CENT, VORLAGEN_FILE,
+  GWG_GRENZE_BRUTTO_CENT, KU_GRENZE_VORJAHR_CENT, KU_GRENZE_LAUFEND_CENT, VORLAGEN_FILE, FAHRT_ERSTATTUNG_STANDARD_CENT,
 } from "./config.js";
-import { aufteilen, migriereKategorien, euer, ergebnis, gesellschafterUebersicht, faelligePerioden, zahlJahr } from "./euer.js";
+import { aufteilen, migriereKategorien, euer, ergebnis, gesellschafterUebersicht, faelligePerioden, zahlJahr, fahrtenUebersicht } from "./euer.js";
 import * as G from "./graph.js";
 import {
-  esc, heute, uuid, euro, betragText, parseBetrag, datumDE, dateiname,
+  esc, safeUrl, heute, uuid, euro, betragText, parseBetrag, datumDE, dateiname,
   compressImage, bilderZuPdf, eigenbelegPdf, journalExcel, kiAuslesen, kiTest, euerPdf,
 } from "./util.js";
 
@@ -42,6 +42,17 @@ const aktiv = () => S.betriebe.find((b) => b.key === S.active) || null;
 const aktivData = () => (aktiv() ? S.data[aktiv().key] : null);
 const ichBin = () => (S.account && (S.account.name || S.account.username)) || "unbekannt";
 const istGbR = () => aktivData() && aktivData().config.typ === "gbr";
+
+// Personen über Namen zuordnen (voller Name oder gleicher Vorname)
+const normName = (n) => String(n || "").trim().toLowerCase();
+const gleichePerson = (a, b) => !!normName(a) && !!normName(b) && (normName(a) === normName(b) || normName(a).split(/\s+/)[0] === normName(b).split(/\s+/)[0]);
+// Gesellschafterin, die zum angemeldeten Microsoft-Konto passt (sonst die erste)
+function meinePerson(cfg) {
+  const namen = ((cfg && cfg.gesellschafter) || []).map((g) => g.name).filter(Boolean);
+  const ich = (S.account && S.account.name) || "";
+  return namen.find((n) => gleichePerson(n, ich)) || namen[0] || "";
+}
+const fahrtSatz = (cfg) => (cfg && Number.isFinite(cfg.fahrtErstattungCent) ? cfg.fahrtErstattungCent : FAHRT_ERSTATTUNG_STANDARD_CENT);
 
 function speichereBetriebe() {
   ls.set("sk_betriebe", S.betriebe);
@@ -94,21 +105,40 @@ function einladungsLink(b, shareUrl) {
   return `${REDIRECT_URI}?einladung=${code}`;
 }
 
+// Einladung streng prüfen: nur erwartete Felder und Formate (der Link kommt von außen)
+const ID_MUSTER = /^[A-Za-z0-9!._-]{1,200}$/;
+const FREIGABE_HOSTS = /(^|\.)(1drv\.ms|onedrive\.live\.com|live\.com|onedrive\.com|sharepoint\.com)$/i;
+function pruefeEinladung(x) {
+  if (!x || typeof x !== "object" || Array.isArray(x)) throw new Error("ungültig");
+  const inv = { d: x.d, i: x.i, n: x.n, s: x.s };
+  if (typeof inv.d !== "string" || !ID_MUSTER.test(inv.d)) throw new Error("ungültig");
+  if (typeof inv.i !== "string" || !ID_MUSTER.test(inv.i)) throw new Error("ungültig");
+  if (typeof inv.n !== "string" || !inv.n.trim() || inv.n.length > 120) throw new Error("ungültig");
+  // Freigabelink nur übernehmen, wenn er eindeutig zu OneDrive gehört; sonst ohne ihn weiter
+  if (inv.s !== undefined) {
+    try {
+      const u = new URL(String(inv.s));
+      inv.s = u.protocol === "https:" && FREIGABE_HOSTS.test(u.hostname) ? u.href : undefined;
+    } catch (_) { inv.s = undefined; }
+  }
+  return inv;
+}
+
 // Beim Öffnen eines Einladungslinks den Code merken (überlebt die Anmeldung)
 (function merkeEinladung() {
   const p = new URLSearchParams(location.search);
   const code = p.get("einladung");
-  if (code) {
+  if (code && code.length <= 3000 && /^[A-Za-z0-9_-]+$/.test(code)) {
     ls.set("sk_einladung", code);
-    history.replaceState(null, "", location.pathname);
   }
+  if (code) history.replaceState(null, "", location.pathname);
 })();
 
 async function einladungAnnehmen() {
   const code = ls.get("sk_einladung", null);
   if (!code) return;
   let inv;
-  try { inv = JSON.parse(unb64url(code)); } catch (_) {
+  try { inv = pruefeEinladung(JSON.parse(unb64url(code))); } catch (_) {
     ls.set("sk_einladung", null);
     return toast("Der Einladungslink ist ungültig.", "fehler");
   }
@@ -266,7 +296,7 @@ function render() {
       <div class="brand"><img src="icons/icon-192.png" alt=""><span>Schuhkarton Steuer</span></div>
       ${S.betriebe.length ? `
         <div class="seg" role="tablist">
-          ${S.betriebe.map((x) => `<button data-act="betrieb" data-key="${x.key}" class="${x.key === S.active ? "on" : ""}">${esc(x.name)}</button>`).join("")}
+          ${S.betriebe.map((x) => `<button data-act="betrieb" data-key="${esc(x.key)}" class="${x.key === S.active ? "on" : ""}">${esc(x.name)}</button>`).join("")}
         </div>` : ""}
     </header>
     <main id="main"></main>
@@ -313,9 +343,19 @@ function renderErfassen(main) {
           <button data-act="foto"><b>📷</b>Beleg fotografieren</button>
           <button data-act="datei"><b>📄</b>PDF oder Bild wählen</button>
           <button data-act="ohne"><b>✍️</b>Ohne Beleg<small>Eigenbeleg, Pauschale${istGbR() ? ", Einlage/Entnahme" : ""}</small></button>
+          ${istGbR() ? `<button data-act="fahrt"><b>🚗</b>Fahrt<small>mit eigenem Pkw: Erstattung + Sonderbetriebsausgabe</small></button>` : ""}
         </div>
         ${S.queue.length ? `<p class="hinweis">Noch ${S.queue.length} Datei(en) in der Warteschlange.</p>` : ""}
       </section>`;
+    return;
+  }
+  if (d.mode === "fahrt") {
+    main.innerHTML = `
+      <section class="card">
+        <div class="kopf"><h2>Fahrt erfassen</h2><button class="link" data-act="verwerfen">Verwerfen</button></div>
+        ${formularFahrt(d.values || {}, { neu: true })}
+      </section>`;
+    bindFahrt(main.querySelector("form"));
     return;
   }
   const ki = d.ki || {};
@@ -345,6 +385,14 @@ function kiLeiste(ki) {
   if (ki.status === "ok") return `<div class="ki ok">✓ Von der KI ausgefüllt – bitte prüfen.${ki.begruendung ? `<br><small>${esc(ki.begruendung)}</small>` : ""}${ki.unsicher && ki.unsicher.length ? `<br><small>Unsicher: ${esc(ki.unsicher.join(", "))}</small>` : ""}</div>`;
   if (ki.status === "fehler") return `<div class="ki fehler">KI konnte nicht auslesen: ${esc(ki.info)} <button class="link" data-act="ki">Nochmal</button></div>`;
   return `<button class="sekundaer" data-act="ki">🔍 Mit KI auslesen</button>`;
+}
+
+// Lieferant bei Pauschalen: die Person, die die Kosten trägt
+function pauschalePartner(typ, cfg, bezahltVon) {
+  const person = cfg.typ === "gbr"
+    ? (bezahltVon && bezahltVon !== "betrieb" ? bezahltVon : meinePerson(cfg))
+    : cfg.inhaber || (S.account && S.account.name) || ichBin();
+  return `${person} (${typ === "km" ? "eigener Pkw" : "Homeoffice"})`;
 }
 
 function formular(v, { neu, ohne, unsicher = [] }) {
@@ -396,6 +444,7 @@ function formular(v, { neu, ohne, unsicher = [] }) {
     <label data-show="behandlung">Behandlung<select name="behandlung">
       ${opt("einlage", "Einlage (Standard)", v.behandlung || "einlage")}${opt("erstattung", "Wird vom GbR-Konto erstattet", v.behandlung)}${opt("sonderbetriebsausgabe", "Sonderbetriebsausgabe (trägt sie allein)", v.behandlung)}
     </select></label>
+    <p data-show="hoHinweis" class="hinweis neutral">Die Homeoffice-Pauschale gehört zur Gesellschafterin, in deren Wohnung gearbeitet wurde: „Bezahlt von: … privat“ und „Sonderbetriebsausgabe“ wählen. Als GbR-Ausgabe würde sie auf beide verteilt.</p>
     <label data-show="eigenbeleg">Grund für Eigenbeleg<select name="eigenbelegGrund">${EIGENBELEG_GRUENDE.map((g) => opt(g, g, v.eigenbelegGrund)).join("")}</select></label>
     <input type="hidden" name="ohne" value="${ohne ? "1" : ""}">
     <div class="aktionen">
@@ -429,6 +478,8 @@ function bindFormular(form, v) {
       pauschaleMenge: ohne && art === "ausgabe" && form.pauschaleTyp.value !== "",
       anteil: art === "ausgabe" && !form.pauschaleTyp.value,
       bewirtung: art === "ausgabe" && form.kategorie.value === "Bewirtung",
+      hoHinweis: gbr && art === "ausgabe" && (form.pauschaleTyp.value === "ho" || form.kategorie.value === "Homeoffice-Pauschale") &&
+        !(form.bezahltVon.value !== "betrieb" && form.behandlung.value === "sonderbetriebsausgabe"),
     };
     form.querySelectorAll("[data-show]").forEach((el) => (el.style.display = show[el.dataset.show] ? "" : "none"));
     const lbl = form.querySelector('[data-lbl="partner"]');
@@ -445,8 +496,21 @@ function bindFormular(form, v) {
     }
     letzteArt = art;
   };
-  const pauschale = () => {
+  const pauschale = (geaendertFeld) => {
     const typ = form.pauschaleTyp.value;
+    if (typ && geaendertFeld === "pauschaleTyp") {
+      // Homeoffice liegt in der Wohnung der Gesellschafterin → in der GbR ihre Sonderbetriebsausgabe
+      if (gbr && typ === "ho") {
+        const ich = meinePerson(cfg);
+        if (form.bezahltVon.value === "betrieb" && ich) form.bezahltVon.value = ich;
+        form.behandlung.value = "sonderbetriebsausgabe";
+      }
+      // Lieferant automatisch (überschreibbar), solange nicht selbst eingetragen
+      if (!form.partner.value.trim() || form.dataset.partnerAuto === "1") {
+        form.partner.value = pauschalePartner(typ, cfg, form.bezahltVon.value);
+        form.dataset.partnerAuto = "1";
+      }
+    }
     const n = parseFloat(String(form.pauschaleMenge.value).replace(",", ".")) || 0;
     if (!typ || !n) return;
     if (typ === "km") {
@@ -461,10 +525,13 @@ function bindFormular(form, v) {
   form.addEventListener("change", (e) => {
     if (e.target.name === "belegdatum" && form.status.value === "bezahlt" && !form.dataset.zdGeaendert) form.zahlungsdatum.value = form.belegdatum.value;
     if (e.target.name === "zahlungsdatum") form.dataset.zdGeaendert = "1";
-    if (e.target.name === "pauschaleTyp" || e.target.name === "pauschaleMenge") pauschale();
+    if (e.target.name === "pauschaleTyp" || e.target.name === "pauschaleMenge") pauschale(e.target.name);
+    if (e.target.name === "bezahltVon" && form.dataset.partnerAuto === "1" && form.pauschaleTyp.value) form.partner.value = pauschalePartner(form.pauschaleTyp.value, cfg, form.bezahltVon.value);
+    if (e.target.name === "partner") form.dataset.partnerAuto = "";
     update();
   });
-  form.pauschaleMenge.addEventListener("input", pauschale);
+  form.partner.addEventListener("input", () => (form.dataset.partnerAuto = ""));
+  form.pauschaleMenge.addEventListener("input", () => pauschale("pauschaleMenge"));
   form.betrag.addEventListener("input", update);
   form.anteil.addEventListener("input", update);
   update();
@@ -483,6 +550,8 @@ function leseFormular(form) {
   const bewirtung = art === "ausgabe" && f.kategorie === "Bewirtung";
   if (bewirtung && (!f.bewAnlass.trim() || !f.bewTeilnehmende.trim() || !f.bewOrt.trim())) throw new Error("Bitte bei Bewirtungen Anlass, Teilnehmende und Ort angeben – das verlangt das Finanzamt.");
   if (handel && !f.kategorie) throw new Error("Bitte eine Kategorie wählen.");
+  const mitPauschale = art === "ausgabe" && f.ohne === "1" && !!f.pauschaleTyp;
+  if (mitPauschale && !f.partner.trim()) f.partner = pauschalePartner(f.pauschaleTyp, aktivData().config, f.bezahltVon);
   if (handel && !f.partner.trim()) throw new Error(art === "einnahme" ? "Bitte Kunde/Zahlende:n angeben." : "Bitte Lieferant/Empfänger:in angeben.");
   if (!handel && !f.gesellschafterin) throw new Error("Bitte in den Betriebsdaten Gesellschafterinnen eintragen.");
   const status = handel ? f.status : "bezahlt";
@@ -540,6 +609,7 @@ function sichereEntwurfsWerte() {
   if (!S.draft || !form) return;
   const f = Object.fromEntries(new FormData(form).entries());
   const v = { ...f };
+  if (form.fahrtForm) v.hinUndZurueck = form.hinUndZurueck.checked ? "on" : "";
   const c = parseBetrag(f.betrag);
   if (c > 0) v.betragCent = c;
   S.draft.values = { ...S.draft.values, ...v };
@@ -646,6 +716,253 @@ async function speichereNeu(form) {
 }
 
 // ---------------------------------------------------------------------------
+// Fahrten (GbR, Variante 5): Erstattung durch die GbR + Sonderbetriebsausgabe der Fahrerin
+// ---------------------------------------------------------------------------
+const satzText = (c) => (c / 100).toLocaleString("de-DE", { minimumFractionDigits: 2 }) + " €";
+
+function formularFahrt(v, { neu }) {
+  const cfg = aktivData().config;
+  const ges = (cfg.gesellschafter || []).map((g) => g.name).filter(Boolean);
+  const f = v.fahrt || {};
+  const fahrerin = v.fahrerin || f.fahrerin || meinePerson(cfg);
+  const mit = v.mitfahrerin ?? f.mitfahrerin ?? "";
+  const hz = v.fahrt ? !!f.hinUndZurueck : v.hinUndZurueck === undefined ? true : !!v.hinUndZurueck;
+  const status = v.status || "offen";
+  return `
+  <form id="f" autocomplete="off">
+    <input type="hidden" name="fahrtForm" value="1">
+    <label>Datum der Fahrt<input type="date" name="belegdatum" value="${esc(v.belegdatum || heute())}" required></label>
+    <div class="zwei">
+      <label>Start<input name="start" value="${esc(v.start || f.start || "")}" placeholder="z. B. Rostock"></label>
+      <label>Ziel<input name="ziel" value="${esc(v.ziel || f.ziel || "")}" placeholder="z. B. Berlin"></label>
+    </div>
+    <label>Betrieblicher Anlass<input name="anlass" value="${esc(v.anlass || f.anlass || "")}" placeholder="z. B. Workshop bei Kunde X"></label>
+    <div class="zwei">
+      <label>km (einfache Strecke)<input name="km" inputmode="decimal" value="${esc(v.km || f.km || "")}"></label>
+      <label class="check unten"><input type="checkbox" name="hinUndZurueck" ${hz ? "checked" : ""}> Hin und zurück</label>
+    </div>
+    <div class="zwei">
+      <label>Fahrerin<select name="fahrerin">${ges.map((n) => opt(n, n, fahrerin)).join("")}</select></label>
+      <label>Mitfahrerin<select name="mitfahrerin">${opt("", "niemand", mit)}${ges.map((n) => opt(n, n, mit)).join("")}</select></label>
+    </div>
+    <div class="zwei">
+      <label>Erstattung<select name="status">${opt("offen", "offen (Jahresende)", status)}${opt("bezahlt", "überwiesen", status)}</select></label>
+      <label data-show="zahlungsdatum">Überwiesen am<input type="date" name="zahlungsdatum" value="${esc(v.zahlungsdatum || heute())}"></label>
+    </div>
+    <div class="fahrt-rechnung" data-lbl="rechnung"></div>
+    <p class="klein">Die GbR erstattet ${satzText(fahrtSatz(cfg))} je km (Betriebsausgabe der GbR, Sonderbetriebseinnahme der Fahrerin). Die Fahrerin setzt ${satzText(KM_PAUSCHALE_CENT)} je km als Sonderbetriebsausgabe an. Die Erstattung bitte bis 31.12. überweisen.</p>
+    <div class="aktionen">
+      <button type="submit" class="primary big">${neu ? "Fahrt speichern" : "Änderungen speichern"}</button>
+    </div>
+  </form>`;
+}
+
+function fahrtWerte(form) {
+  const cfg = aktivData().config;
+  const km = parseFloat(String(form.km.value).replace(",", ".")) || 0;
+  const hz = form.hinUndZurueck.checked;
+  const kmGesamt = Math.round((hz ? 2 : 1) * km * 10) / 10;
+  const satzCent = fahrtSatz(cfg);
+  return { km, hz, kmGesamt, satzCent, erstattungCent: Math.round(kmGesamt * satzCent), sbaCent: Math.round(kmGesamt * KM_PAUSCHALE_CENT) };
+}
+
+function bindFahrt(form) {
+  const update = () => {
+    const w = fahrtWerte(form);
+    form.querySelector('[data-show="zahlungsdatum"]').style.display = form.status.value === "bezahlt" ? "" : "none";
+    const fahrerin = form.fahrerin.value;
+    form.querySelector('[data-lbl="rechnung"]').innerHTML = w.kmGesamt > 0
+      ? `<table class="uebersicht">
+          <tr><td>${w.hz ? `2 × ${esc(String(w.km).replace(".", ","))} km = ` : ""}${esc(String(w.kmGesamt).replace(".", ","))} km</td><td></td></tr>
+          <tr><td>Erstattung GbR (${satzText(w.satzCent)}/km)</td><td>${euro(w.erstattungCent)}</td></tr>
+          <tr><td>Sonderbetriebsausgabe ${esc(vorname(fahrerin))} (${satzText(KM_PAUSCHALE_CENT)}/km)</td><td>${euro(w.sbaCent)}</td></tr>
+        </table>`
+      : "";
+  };
+  form.addEventListener("input", update);
+  form.addEventListener("change", update);
+  update();
+}
+
+function leseFahrt(form) {
+  const f = Object.fromEntries(new FormData(form).entries());
+  const w = fahrtWerte(form);
+  if (!f.belegdatum) throw new Error("Bitte das Datum der Fahrt angeben.");
+  if (!f.start.trim() || !f.ziel.trim()) throw new Error("Bitte Start und Ziel angeben.");
+  if (!f.anlass.trim()) throw new Error("Bitte den betrieblichen Anlass angeben – das gehört zum Nachweis.");
+  if (!(w.km > 0) || w.km > 5000) throw new Error("Bitte die gefahrenen km angeben.");
+  if (!f.fahrerin) throw new Error("Bitte in den Betriebsdaten Gesellschafterinnen eintragen.");
+  if (f.mitfahrerin && f.mitfahrerin === f.fahrerin) throw new Error("Fahrerin und Mitfahrerin sind dieselbe Person.");
+  const bezahlt = f.status === "bezahlt";
+  if (bezahlt && !f.zahlungsdatum) throw new Error("Bitte das Überweisungsdatum angeben.");
+  const fahrt = {
+    start: f.start.trim(), ziel: f.ziel.trim(), anlass: f.anlass.trim(),
+    km: w.km, hinUndZurueck: w.hz, kmGesamt: w.kmGesamt,
+    fahrerin: f.fahrerin, mitfahrerin: f.mitfahrerin || "",
+    satzCent: w.satzCent, sbaSatzCent: KM_PAUSCHALE_CENT, sbaCent: w.sbaCent,
+  };
+  return {
+    art: "ausgabe",
+    belegdatum: f.belegdatum,
+    betragCent: w.erstattungCent,
+    partner: `${f.fahrerin} (eigener Pkw)`,
+    kategorie: "Fahrtkosten eigener Pkw",
+    beschreibung: `${fahrt.start} – ${fahrt.ziel}${fahrt.hinUndZurueck ? " und zurück" : ""}: ${fahrt.anlass}`,
+    rechnungsnr: "",
+    status: bezahlt ? "bezahlt" : "offen",
+    zahlungsdatum: bezahlt ? f.zahlungsdatum : null,
+    bezahltVon: "betrieb",
+    behandlung: null,
+    gesellschafterin: "",
+    entnahmeArt: null,
+    eigenbelegGrund: EIGENBELEG_GRUENDE[0],
+    pauschale: `${String(fahrt.kmGesamt).replace(".", ",")} km × ${satzText(w.satzCent)} Erstattung · SBA ${String(fahrt.kmGesamt).replace(".", ",")} km × ${satzText(KM_PAUSCHALE_CENT)}`,
+    gesamtCent: null,
+    anteilProzent: null,
+    bewAnlass: null, bewTeilnehmende: null, bewOrt: null,
+    fahrt,
+  };
+}
+
+function pruefeFahrtDoppelt(e, eigeneId) {
+  const dup = aktivData().journal.eintraege.find((x) => x.fahrt && !x.storniert && x.id !== eigeneId &&
+    x.belegdatum === e.belegdatum && x.fahrt.fahrerin === e.fahrt.fahrerin && x.fahrt.kmGesamt === e.fahrt.kmGesamt);
+  return !dup || confirm(`Am ${datumDE(e.belegdatum)} gibt es schon eine Fahrt von ${dup.fahrt.fahrerin} mit ${dup.fahrt.kmGesamt} km (${dup.belegnr}).\n\nTrotzdem speichern?`);
+}
+
+async function speichereFahrt(form) {
+  const b = aktiv();
+  const dat = aktivData();
+  let e;
+  try { e = leseFahrt(form); } catch (err) { return toast(err.message, "fehler"); }
+  if (!pruefeFahrtDoppelt(e, null)) return;
+  busy("Speichere Fahrt …");
+  try {
+    await ladeBetrieb(b, true);
+    const jahr = e.belegdatum.slice(0, 4);
+    e.id = S.draft.id;
+    e.belegnr = naechsteBelegnr(S.data[b.key].journal, jahr);
+    e.eigenbeleg = true;
+    e.erfasstVon = ichBin();
+    e.erfasstAm = new Date().toISOString();
+    e.storniert = false;
+    e.historie = [];
+    const blob = eigenbelegPdf(e, dat.config, ichBin());
+    busy("Lege Eigenbeleg in OneDrive ab …");
+    const ordner = await G.ensurePath(b.driveId, b.itemId, [BELEGE_FOLDER, jahr]);
+    const item = await G.uploadFile(b.driveId, ordner, dateiname(e, dat.config.kurz), blob);
+    e.datei = { id: item.id, name: item.name, webUrl: item.webUrl, driveId: b.driveId };
+    const nr = await updateJournal(b, (j) => {
+      if (j.eintraege.some((x) => x.belegnr === e.belegnr)) e.belegnr = naechsteBelegnr(j, jahr);
+      j.eintraege.push(e);
+      return e.belegnr;
+    });
+    await excelSpiegeln(b);
+    busy(null);
+    toast(`Fahrt gespeichert als ${nr}`);
+    S.draft = null;
+    render();
+  } catch (err) { fehler(err); }
+}
+
+async function speichereFahrtBearbeitung(form) {
+  const b = aktiv();
+  const id = form.dataset.editId;
+  let neu;
+  try { neu = leseFahrt(form); } catch (err) { return toast(err.message, "fehler"); }
+  if (!pruefeFahrtDoppelt(neu, id)) return;
+  busy("Speichere Änderungen …");
+  try {
+    const res = await updateJournal(b, (j) => {
+      const e = j.eintraege.find((x) => x.id === id);
+      if (!e) throw new Error("Eintrag nicht gefunden.");
+      const felder = Object.keys(neu).filter((k) => JSON.stringify(neu[k] ?? null) !== JSON.stringify(e[k] ?? null));
+      Object.assign(e, neu);
+      if (felder.length) (e.historie = e.historie || []).push({ am: new Date().toISOString(), von: ichBin(), felder });
+      return { ...e };
+    });
+    await eigenbelegErneuern(b, id, res);
+    await excelSpiegeln(b);
+    busy(null);
+    closeModal();
+    toast("Änderungen gespeichert");
+    render();
+  } catch (err) { fehler(err); }
+}
+
+// Eigenbeleg-PDF nach einer Änderung neu erzeugen (Inhalt ersetzen, Datei ggf. umbenennen)
+async function eigenbelegErneuern(b, id, e) {
+  if (!e.datei || !e.datei.id) return;
+  try {
+    const blob = eigenbelegPdf(e, aktivData().config, ichBin());
+    const driveId = e.datei.driveId || b.driveId;
+    await G.replaceContent(driveId, e.datei.id, blob);
+    const name = dateiname(e, aktivData().config.kurz);
+    if (name !== e.datei.name) {
+      const it = await G.renameItem(driveId, e.datei.id, name);
+      await updateJournal(b, (j) => { const x = j.eintraege.find((y) => y.id === id); x.datei.name = it.name; x.datei.webUrl = it.webUrl; });
+    }
+  } catch (er) {
+    console.warn(er);
+    toast("Hinweis: Der Eigenbeleg konnte nicht aktualisiert werden. Die Buchung ist gespeichert.", "warn");
+  }
+}
+
+// Jahresabrechnung: offene Erstattungen einer Fahrerin als überwiesen markieren
+function zeigeFahrtenAbrechnen(name) {
+  const d = aktivData();
+  const p = fahrtenUebersicht(d.journal, d.config, S.jahr).personen.find((x) => x.name === name);
+  if (!p || !p.offen.length) return;
+  const vorschlag = heute() > `${S.jahr}-12-31` ? `${S.jahr}-12-31` : heute();
+  modal(`
+    <div class="kopf"><h2>Erstattung an ${esc(vorname(name))}</h2><button class="link" data-act="modal-zu">Abbrechen</button></div>
+    <p><b>${euro(p.offenCent)}</b> für ${p.offen.length} Fahrt${p.offen.length === 1 ? "" : "en"} (${esc(String(p.offen.reduce((a, e) => a + (e.fahrt.kmGesamt || 0), 0)).replace(".", ","))} km).</p>
+    <ul class="liste kompakt">${p.offen.map((e) => `<li><div class="l1"><span>${datumDE(e.belegdatum)} · ${esc(e.fahrt.start)} – ${esc(e.fahrt.ziel)}</span><b>${euro(e.betragCent)}</b></div></li>`).join("")}</ul>
+    <form id="abrechnung">
+      <label>Überwiesen am<input type="date" name="datum" value="${esc(vorschlag)}" required></label>
+      <p class="klein">Erst überweisen, dann hier markieren. Die Erstattung zählt im Jahr der Überweisung – damit sie in ${esc(S.jahr)} zählt, spätestens am 31.12.${esc(S.jahr)}.</p>
+      <div class="aktionen"><button type="submit" class="primary big">Als überwiesen markieren</button></div>
+    </form>`);
+  modalEl.querySelector("#abrechnung").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const datum = ev.target.datum.value;
+    if (!datum) return;
+    if (datum.slice(0, 4) !== S.jahr && !confirm(`Das Datum liegt nicht in ${S.jahr}. Die Erstattungen zählen dann erst ${datum.slice(0, 4)} – auch die Ausgabe der GbR.\n\nTrotzdem so markieren?`)) return;
+    const ids = p.offen.map((e) => e.id);
+    const b = aktiv();
+    busy("Markiere als überwiesen …");
+    try {
+      await updateJournal(b, (j) => {
+        for (const e of j.eintraege) {
+          if (!ids.includes(e.id) || e.status !== "offen") continue;
+          e.status = "bezahlt";
+          e.zahlungsdatum = datum;
+          (e.historie = e.historie || []).push({ am: new Date().toISOString(), von: ichBin(), felder: ["status", "zahlungsdatum"] });
+        }
+      });
+      // Eigenbelege mit Überweisungsdatum aktualisieren
+      for (const id of ids) {
+        const e = aktivData().journal.eintraege.find((x) => x.id === id);
+        if (e) await eigenbelegErneuern(b, id, e);
+      }
+      await excelSpiegeln(b);
+      busy(null);
+      closeModal();
+      toast(`${ids.length} Fahrt${ids.length === 1 ? "" : "en"} als überwiesen markiert`);
+      render();
+    } catch (err) { fehler(err); }
+  });
+}
+
+function zeigeFahrtenliste() {
+  const d = aktivData();
+  const fu = fahrtenUebersicht(d.journal, d.config, S.jahr);
+  modal(`
+    <div class="kopf"><h2>Fahrten ${esc(S.jahr)}</h2><button class="link" data-act="modal-zu">Schließen</button></div>
+    ${fu.fahrten.length ? `<ul class="liste">${fu.fahrten.map(zeile).join("")}</ul>` : `<p class="leer">Keine Fahrten.</p>`}`);
+}
+
+// ---------------------------------------------------------------------------
 // Journal
 // ---------------------------------------------------------------------------
 function eintraegeJahr() {
@@ -738,9 +1055,10 @@ function gbrUebersicht(d, cfg, r) {
         ${ausgeglichen ? "" : `<div class="ausgleich-info" hidden>Ausgleichen lässt sich das durch eine Einlage der Gesellschafterin mit dem niedrigeren Stand oder eine Entnahme der Gesellschafterin mit dem höheren Stand. Ob und wann ihr ausgleicht, vereinbart ihr untereinander – steuerlich spielt es keine Rolle.</div>`}
       </div>
       <table class="uebersicht steuer">
+        ${g.personen.some((p) => p.sbe) ? reihe("+ Sonderbetriebs&shy;einnahmen", g.personen.map((p) => p.sbe)) : ""}
         ${reihe("− Sonderbetriebs&shy;ausgaben", g.personen.map((p) => p.sba))}
         ${reihe("= Gewinnanteil (Steuer)", g.personen.map((p) => p.gewinnSteuer), "summe")}
-        <tr><td colspan="${ges.length + 1}" class="erl">Anteil am steuerlichen Gewinn − Sonderbetriebsausgaben · für die Feststellungserklärung</td></tr>
+        <tr><td colspan="${ges.length + 1}" class="erl">Anteil am steuerlichen Gewinn${g.personen.some((p) => p.sbe) ? " + Sonderbetriebseinnahmen" : ""} − Sonderbetriebsausgaben · für die Feststellungserklärung</td></tr>
       </table>
     </section>`;
 }
@@ -755,19 +1073,22 @@ function personKlasse(name) {
 
 function zeile(e) {
   const minus = e.art === "ausgabe" || e.art === "entnahme";
-  const titel = e.partner || (e.art === "einlage" ? `Einlage ${e.gesellschafterin}` : `Entnahme ${e.gesellschafterin}`);
+  const titel = e.fahrt
+    ? `Fahrt ${e.fahrt.start} – ${e.fahrt.ziel}`
+    : e.partner || (e.art === "einlage" ? `Einlage ${e.gesellschafterin}` : `Entnahme ${e.gesellschafterin}`);
   const badges = [];
   if (e.storniert) badges.push(`<i class="b rot">storniert</i>`);
-  if (e.status === "offen") badges.push(`<i class="b">offen</i>`);
-  if (e.eigenbeleg) badges.push(`<i class="b">Eigenbeleg</i>`);
-  if (e.anteilProzent) badges.push(`<i class="b">${String(e.anteilProzent).replace(".", ",")} %</i>`);
+  if (e.status === "offen") badges.push(`<i class="b">${e.fahrt ? "Erstattung offen" : "offen"}</i>`);
+  if (e.eigenbeleg && !e.fahrt) badges.push(`<i class="b">Eigenbeleg</i>`);
+  if (e.anteilProzent) badges.push(`<i class="b">${esc(String(e.anteilProzent).replace(".", ","))} %</i>`);
   const pb = (txt, name) => badges.push(`<i class="b ${personKlasse(name)}">${esc(txt)} ${esc(name)}</i>`);
   if (e.behandlung === "einlage") pb("Einlage", e.bezahltVon);
   if (e.behandlung === "erstattung") pb("vorgestreckt", e.bezahltVon);
   if (e.behandlung === "sonderbetriebsausgabe") pb("SBA", e.bezahltVon);
   if (e.art === "einlage") pb("Einlage", e.gesellschafterin);
   if (e.art === "entnahme") pb(e.entnahmeArt === "erstattung" ? "Erstattung" : "Entnahme", e.gesellschafterin);
-  return `<li data-act="detail" data-id="${e.id}" class="${e.storniert ? "storno" : ""}">
+  if (e.fahrt) pb(`Fahrt ${String(e.fahrt.kmGesamt).replace(".", ",")} km`, e.fahrt.fahrerin);
+  return `<li data-act="detail" data-id="${esc(e.id)}" class="${e.storniert ? "storno" : ""}">
     <div class="l1"><span>${esc(titel)}</span><b><i class="punkt ${minus ? "aus" : "ein"}"></i>${minus ? "−" : "+"}${euro(e.betragCent)}</b></div>
     <div class="l2"><span>${datumDE(e.zahlungsdatum || e.belegdatum)} · ${esc(e.belegnr)} · ${esc(e.kategorie || (e.art === "einlage" ? "Einlage" : "Entnahme"))}</span>${badges.join("")}</div>
   </li>`;
@@ -776,12 +1097,23 @@ function zeile(e) {
 function zeigeDetail(id) {
   const e = aktivData().journal.eintraege.find((x) => x.id === id);
   if (!e) return;
-  const artText = { ausgabe: "Ausgabe", einnahme: "Einnahme", einlage: "Geldeinlage", entnahme: "Entnahme" }[e.art];
+  const artText = e.fahrt ? "Fahrt" : { ausgabe: "Ausgabe", einnahme: "Einnahme", einlage: "Geldeinlage", entnahme: "Entnahme" }[e.art];
   const reihe = (l, w) => (w ? `<tr><th>${l}</th><td>${w}</td></tr>` : "");
+  const f = e.fahrt;
+  const fahrtReihen = f ? [
+    reihe("Fahrtdatum", datumDE(e.belegdatum)),
+    reihe("Strecke", `${esc(f.start)} – ${esc(f.ziel)}${f.hinUndZurueck ? " und zurück" : ""}`),
+    reihe("Anlass", esc(f.anlass)),
+    reihe("km", esc(f.hinUndZurueck ? `2 × ${f.km} = ${f.kmGesamt}` : String(f.kmGesamt))),
+    reihe("Fahrerin", esc(f.fahrerin)),
+    reihe("Mitfahrerin", esc(f.mitfahrerin || "niemand")),
+    reihe("Erstattung GbR", `${euro(e.betragCent)} (${satzText(f.satzCent)}/km)<br><small>${e.status === "bezahlt" ? `überwiesen am ${datumDE(e.zahlungsdatum)}` : "noch nicht überwiesen"}</small>`),
+    reihe("Sonderbetriebs&shy;ausgabe", `${euro(f.sbaCent)} (${satzText(f.sbaSatzCent)}/km, ${esc(vorname(f.fahrerin))})`),
+  ].join("") : "";
   modal(`
     <div class="kopf"><h2>${esc(e.belegnr)} · ${artText}</h2><button class="link" data-act="modal-zu">Schließen</button></div>
     <table class="detail">
-      ${reihe("Betrag", euro(e.betragCent) + (e.anteilProzent ? `<br><small>${String(e.anteilProzent).replace(".", ",")} % von ${euro(e.gesamtCent)}</small>` : ""))}
+      ${f ? fahrtReihen : `${reihe("Betrag", euro(e.betragCent) + (e.anteilProzent ? `<br><small>${String(e.anteilProzent).replace(".", ",")} % von ${euro(e.gesamtCent)}</small>` : ""))}
       ${reihe("Belegdatum", datumDE(e.belegdatum))}
       ${reihe("Status", e.status === "bezahlt" ? `bezahlt am ${datumDE(e.zahlungsdatum)}` : "offen")}
       ${reihe(e.art === "einnahme" ? "Kunde" : "Lieferant", esc(e.partner))}
@@ -793,15 +1125,16 @@ function zeigeDetail(id) {
       ${reihe("Bezahlt von", e.bezahltVon && e.bezahltVon !== "betrieb" ? esc(e.bezahltVon) + " privat" : "")}
       ${reihe("Behandlung", esc({ einlage: "Einlage", erstattung: "wird erstattet", sonderbetriebsausgabe: "Sonderbetriebsausgabe" }[e.behandlung] || ""))}
       ${reihe("Entnahme", esc({ erstattung: "Erstattung", privat: "Privatentnahme" }[e.entnahmeArt] || ""))}
-      ${reihe("Eigenbeleg", e.eigenbeleg ? esc(e.eigenbelegGrund) + (e.pauschale ? `<br><small>${esc(e.pauschale)}</small>` : "") : "")}
+      ${reihe("Eigenbeleg", e.eigenbeleg ? esc(e.eigenbelegGrund) + (e.pauschale ? `<br><small>${esc(e.pauschale)}</small>` : "") : "")}`}
+      ${reihe("Beleg-Nr.", esc(e.belegnr))}
       ${reihe("Erfasst", `${esc(e.erfasstVon)}, ${new Date(e.erfasstAm).toLocaleString("de-DE")}`)}
       ${e.storniert ? reihe("Storniert", esc(e.stornoGrund || "")) : ""}
       ${(e.historie || []).length ? reihe("Änderungen", e.historie.map((h) => `${new Date(h.am).toLocaleDateString("de-DE")} ${esc(h.von)}: ${esc(h.felder.join(", "))}`).join("<br>")) : ""}
     </table>
     <div class="aktionen">
-      ${e.datei && e.datei.webUrl ? `<a class="sekundaer btn" href="${esc(e.datei.webUrl)}" target="_blank" rel="noopener">📄 Beleg öffnen</a>` : ""}
-      ${!e.storniert ? `<button class="sekundaer" data-act="bearbeiten" data-id="${e.id}">Bearbeiten</button>
-      <button class="gefahr" data-act="storno" data-id="${e.id}">Stornieren</button>` : ""}
+      ${e.datei && safeUrl(e.datei.webUrl) ? `<a class="sekundaer btn" href="${esc(safeUrl(e.datei.webUrl))}" target="_blank" rel="noopener">📄 Beleg öffnen</a>` : ""}
+      ${!e.storniert ? `<button class="sekundaer" data-act="bearbeiten" data-id="${esc(e.id)}">Bearbeiten</button>
+      <button class="gefahr" data-act="storno" data-id="${esc(e.id)}">Stornieren</button>` : ""}
     </div>`);
 }
 
@@ -810,10 +1143,11 @@ function zeigeBearbeiten(id) {
   if (!e) return;
   modal(`
     <div class="kopf"><h2>${esc(e.belegnr)} bearbeiten</h2><button class="link" data-act="modal-zu">Abbrechen</button></div>
-    ${formular(e, { neu: false, ohne: e.eigenbeleg })}`);
+    ${e.fahrt ? formularFahrt(e, { neu: false }) : formular(e, { neu: false, ohne: e.eigenbeleg })}`);
   const form = modalEl.querySelector("form");
   form.dataset.editId = id;
-  bindFormular(form, e);
+  if (e.fahrt) bindFahrt(form);
+  else bindFormular(form, e);
 }
 
 async function speichereBearbeitung(form) {
@@ -881,16 +1215,70 @@ function jahreListe(d) {
   return [...new Set([String(new Date().getFullYear()), ...d.journal.eintraege.map(zahlJahr)])].filter(Boolean).sort().reverse();
 }
 
+// Homeoffice-Pauschale je Person über alle verbundenen Betriebe
+function homeofficeJePerson(jahr) {
+  const personen = new Map();
+  const ohnePerson = [];
+  for (const b of S.betriebe) {
+    const d = S.data[b.key];
+    if (!d) continue;
+    const gbr = d.config.typ === "gbr";
+    for (const e of d.journal.eintraege) {
+      if (e.storniert || e.status !== "bezahlt" || e.kategorie !== "Homeoffice-Pauschale" || zahlJahr(e) !== jahr) continue;
+      let person = gbr ? (e.bezahltVon && e.bezahltVon !== "betrieb" ? e.bezahltVon : null) : d.config.inhaber || null;
+      if (!person) { if (gbr) ohnePerson.push({ betrieb: d.config.name, e }); continue; }
+      const key = [...personen.keys()].find((k) => gleichePerson(k, person)) || person;
+      const x = personen.get(key) || { name: key, cent: 0, teile: {} };
+      x.cent += e.betragCent;
+      x.teile[d.config.name] = (x.teile[d.config.name] || 0) + e.betragCent;
+      personen.set(key, x);
+    }
+  }
+  return { personen: [...personen.values()], ohnePerson };
+}
+
+function homeofficeHinweise(d, jahr) {
+  const out = [];
+  const gbr = d.config.typ === "gbr";
+  const { personen, ohnePerson } = homeofficeJePerson(jahr);
+  const hier = gbr ? (d.config.gesellschafter || []).map((g) => g.name).filter(Boolean) : [d.config.inhaber].filter(Boolean);
+  for (const p of personen.filter((x) => hier.some((n) => gleichePerson(n, x.name)))) {
+    if (p.cent <= HOMEOFFICE_MAX_CENT) continue;
+    const teile = Object.entries(p.teile);
+    const aufteilung = teile.length > 1 ? ` (${teile.map(([n, c]) => `${n} ${euro(c)}`).join(", ")})` : "";
+    out.push(["fehler", `Homeoffice-Pauschale ${vorname(p.name)} ${jahr}: ${euro(p.cent)}${aufteilung} – höchstens ${euro(HOMEOFFICE_MAX_CENT)} (210 Tage) je Person und Jahr, für alle Tätigkeiten zusammen.`]);
+  }
+  if (!gbr && !d.config.inhaber) {
+    const ho = d.journal.eintraege.filter((e) => !e.storniert && e.status === "bezahlt" && e.kategorie === "Homeoffice-Pauschale" && zahlJahr(e) === jahr).reduce((a, e) => a + e.betragCent, 0);
+    if (ho > HOMEOFFICE_MAX_CENT) out.push(["fehler", `Homeoffice-Pauschale ${euro(ho)} – höchstens ${euro(HOMEOFFICE_MAX_CENT)} im Jahr sind abziehbar.`]);
+  }
+  const falsch = ohnePerson.filter((x) => x.betrieb === d.config.name);
+  if (gbr && falsch.length) out.push(["warn", `${falsch.length} Homeoffice-Buchung${falsch.length === 1 ? "" : "en"} als Ausgabe der GbR – die Pauschale gehört zur Gesellschafterin („Bezahlt von: … privat“, „Sonderbetriebsausgabe“), sonst wird sie auf beide verteilt.`]);
+  return out;
+}
+
 function pruefhinweise(d, eu) {
   const j = S.jahr;
   const hin = [];
   const im = d.journal.eintraege.filter((e) => !e.storniert);
-  const offen = im.filter((e) => e.status === "offen" && (e.belegdatum || "").startsWith(j));
+  const offen = im.filter((e) => e.status === "offen" && !e.fahrt && (e.belegdatum || "").startsWith(j));
   if (offen.length) hin.push(["warn", `${offen.length} offene${offen.length === 1 ? "r Posten" : " Posten"} aus ${j} (${euro(offen.reduce((s, e) => s + e.betragCent, 0))}) – zählen erst, wenn sie bezahlt sind.`]);
   const bew = im.filter((e) => e.kategorie === "Bewirtung" && zahlJahr(e) === j && !(e.bewAnlass && e.bewTeilnehmende));
   if (bew.length) hin.push(["warn", `${bew.length} Bewirtung${bew.length === 1 ? "" : "en"} ohne Anlass oder Teilnehmende – ohne diese Angaben erkennt das Finanzamt den Abzug nicht an.`]);
-  const ho = eu.zeilen.find((z) => z.id === "ho");
-  if (ho && ho.brutto > HOMEOFFICE_MAX_CENT) hin.push(["fehler", `Homeoffice-Pauschale ${euro(ho.brutto)} – höchstens ${euro(HOMEOFFICE_MAX_CENT)} im Jahr sind abziehbar.`]);
+  // Fahrten: offene Erstattungen müssen bis 31.12. überwiesen sein
+  if (d.config.typ === "gbr") {
+    const fu = fahrtenUebersicht(d.journal, d.config, j);
+    const offenF = fu.personen.filter((p) => p.offenCent > 0);
+    if (offenF.length) {
+      const wer = offenF.map((p) => `${euro(p.offenCent)} an ${vorname(p.name)}`).join(", ");
+      const h = heute();
+      if (h > `${j}-12-31`) hin.push(["fehler", `Fahrtkostenerstattungen nicht bis 31.12.${j} überwiesen: ${wer}. Sie zählen erst im Jahr der Überweisung – die Aufteilung ${j} ist dann ungleich.`]);
+      else if (h >= `${j}-12-01`) hin.push(["warn", `Offene Fahrtkostenerstattungen ${wer} – bis 31.12. überweisen, sonst zählen sie erst im nächsten Jahr.`]);
+      else hin.push(["info", `Offene Fahrtkostenerstattungen ${wer} – Abrechnung zum Jahresende (unten unter „Fahrten“).`]);
+    }
+  }
+  // Homeoffice: 1.260 € je Person und Jahr für alle Tätigkeiten zusammen
+  for (const [t, txt] of homeofficeHinweise(d, j)) hin.push([t, txt]);
   if (d.config.kleinunternehmer !== false) {
     const vorjahr = euer(d.journal, String(Number(j) - 1)).be;
     if (eu.be > KU_GRENZE_LAUFEND_CENT) hin.push(["fehler", `Einnahmen über ${euro(KU_GRENZE_LAUFEND_CENT)} – die Kleinunternehmerregelung entfällt ab dem Umsatz, der die Grenze überschreitet. Bitte steuerlich beraten lassen.`]);
@@ -909,7 +1297,7 @@ function renderAuswertung(main) {
   const hin = pruefhinweise(d, eu);
   const gbr = cfg.typ === "gbr" && (cfg.gesellschafter || []).filter((g) => g.name).length > 1;
   const g = gbr ? gesellschafterUebersicht(d.journal, cfg, S.jahr) : null;
-  const zeileHtml = (z) => `<tr data-act="euer-zeile" data-id="${z.id}" class="klick">
+  const zeileHtml = (z) => `<tr data-act="euer-zeile" data-id="${esc(z.id)}" class="klick">
       <td class="z">${esc(z.zeile || "–")}</td>
       <td>${esc(z.bez)}${z.nichtAbziehbar ? `<br><small>gesamt ${euro(z.brutto)}, davon nicht abziehbar ${euro(z.nichtAbziehbar)}</small>` : ""}</td>
       <td class="bt">${euro(z.betrag)}</td></tr>`;
@@ -936,7 +1324,8 @@ function renderAuswertung(main) {
       <h2>Für die Feststellungserklärung</h2>
       <table class="uebersicht">
         <tr><td></td>${g.personen.map((p) => `<th>${esc(vorname(p.name))}</th>`).join("")}</tr>
-        <tr><td>Anteil am Gewinn</td>${g.personen.map((p) => `<td>${euro(p.gewinnSteuer + p.sba)}</td>`).join("")}</tr>
+        <tr><td>Anteil am Gewinn</td>${g.personen.map((p) => `<td>${euro(p.gewinnSteuer + p.sba - p.sbe)}</td>`).join("")}</tr>
+        ${g.personen.some((p) => p.sbe) ? `<tr><td>+ Sonderbetriebs&shy;einnahmen</td>${g.personen.map((p) => `<td>${euro(p.sbe)}</td>`).join("")}</tr>` : ""}
         <tr><td>− Sonderbetriebs&shy;ausgaben</td>${g.personen.map((p) => `<td>${euro(p.sba)}</td>`).join("")}</tr>
         <tr class="summe"><td>= Gewinnanteil</td>${g.personen.map((p) => `<td>${euro(p.gewinnSteuer)}</td>`).join("")}</tr>
         <tr><td colspan="${g.personen.length + 1}" class="erl">Informativ, ohne steuerliche Wirkung:</td></tr>
@@ -944,9 +1333,34 @@ function renderAuswertung(main) {
         <tr><td>Entnahmen</td>${g.personen.map((p) => `<td>${euro(p.entnahmen)}</td>`).join("")}</tr>
       </table>
     </section>` : ""}
+    ${gbr ? fahrtenKarte(d, cfg) : ""}
     <section class="card">
       <button class="primary big" data-act="euer-pdf">PDF „EÜR ${esc(S.jahr)}“ erstellen</button>
       <p class="klein">Das PDF wird im Betriebsordner unter „Auswertungen“ abgelegt und enthält die EÜR${gbr ? ", die Werte für die Feststellungserklärung" : ""} und die Belegliste.</p>
+    </section>`;
+}
+
+function fahrtenKarte(d, cfg) {
+  const fu = fahrtenUebersicht(d.journal, cfg, S.jahr);
+  if (!fu.fahrten.length && !fu.personen.some((p) => p.offenCent)) return "";
+  const kopf = `<tr><td></td>${fu.personen.map((p) => `<th>${esc(vorname(p.name))}</th>`).join("")}</tr>`;
+  const reihe = (label, fn, cls = "") => `<tr class="${cls}"><td>${label}</td>${fu.personen.map((p) => `<td>${fn(p)}</td>`).join("")}</tr>`;
+  return `
+    <section class="card">
+      <h2>Fahrten ${esc(S.jahr)}</h2>
+      <table class="uebersicht">
+        ${kopf}
+        ${reihe("Fahrten", (p) => p.anzahl)}
+        ${reihe("km", (p) => esc(String(p.km).replace(".", ",")))}
+        ${reihe("Sonderbetriebs&shy;ausgabe (0,30 €/km)", (p) => euro(p.sba))}
+        ${reihe("Erstattung überwiesen", (p) => euro(p.ueberwiesenCent))}
+        ${reihe("Erstattung offen", (p) => euro(p.offenCent), "summe")}
+      </table>
+      <div class="aktionen">
+        ${fu.personen.filter((p) => p.offenCent > 0).map((p) => `<button class="primary" data-act="fahrten-abrechnen" data-name="${esc(p.name)}">Erstattung an ${esc(vorname(p.name))} abrechnen (${euro(p.offenCent)})</button>`).join("")}
+        <button class="sekundaer" data-act="fahrtenliste">Fahrtenliste</button>
+      </div>
+      <p class="klein">Einmal am Jahresende je Fahrerin überweisen und hier markieren – spätestens am 31.12., sonst zählt die Erstattung erst im nächsten Jahr. Die Fahrtenliste steht auch im PDF.</p>
     </section>`;
 }
 
@@ -971,7 +1385,11 @@ async function euerExport() {
     const eintraege = d.journal.eintraege
       .filter((e) => !e.storniert && e.status === "bezahlt" && zahlJahr(e) === S.jahr)
       .sort((a, b2) => (a.belegnr || "").localeCompare(b2.belegnr || ""));
-    const blob = euerPdf({ config: cfg, jahr: S.jahr, eu, gesellschaft: gbr ? gesellschafterUebersicht(d.journal, cfg, S.jahr) : null, eintraege, ersteller: ichBin() });
+    const blob = euerPdf({
+      config: cfg, jahr: S.jahr, eu, eintraege, ersteller: ichBin(),
+      gesellschaft: gbr ? gesellschafterUebersicht(d.journal, cfg, S.jahr) : null,
+      fahrten: cfg.typ === "gbr" ? fahrtenUebersicht(d.journal, cfg, S.jahr) : null,
+    });
     busy("Lege PDF in OneDrive ab …");
     const ordner = await G.ensurePath(b.driveId, b.itemId, ["Auswertungen"]);
     const name = `EUER_${S.jahr}_${cfg.kurz}.pdf`;
@@ -1026,11 +1444,11 @@ function zeigeVorlagen(b) {
       return `<li><div><b>${esc(v.bezeichnung)}</b>
         <small>${euro(Math.round((v.gesamtCent * v.anteil) / 100))} ${RHYTHMUS[v.rhythmus]} (${String(v.anteil).replace(".", ",")} % von ${euro(v.gesamtCent)}) · ${esc(v.kategorie)}${v.behandlung === "sonderbetriebsausgabe" ? ` · SBA ${esc(v.bezahltVon)}` : ""}</small>
         <small>ab ${periodeText(v.start)}${v.ende ? ` bis ${periodeText(v.ende)}` : ""}${f.length ? ` · ${f.length} fällig` : ""}</small></div>
-        <div class="knoepfe"><button class="link" data-act="vorlage-edit" data-key="${b.key}" data-id="${v.id}">Bearbeiten</button>
-        <button class="link rot" data-act="vorlage-weg" data-key="${b.key}" data-id="${v.id}">Löschen</button></div></li>`;
+        <div class="knoepfe"><button class="link" data-act="vorlage-edit" data-key="${esc(b.key)}" data-id="${esc(v.id)}">Bearbeiten</button>
+        <button class="link rot" data-act="vorlage-weg" data-key="${esc(b.key)}" data-id="${esc(v.id)}">Löschen</button></div></li>`;
     }).join("")}</ul>` : `<p class="leer">Noch keine Vorlagen.</p>`}
-    <div class="aktionen"><button class="primary" data-act="vorlage-neu" data-key="${b.key}">＋ Neue Vorlage</button>
-    ${liste.some((v) => faelligePerioden(v, heute()).length) ? `<button class="sekundaer" data-act="faellige" data-key="${b.key}">Fällige jetzt prüfen</button>` : ""}</div>`);
+    <div class="aktionen"><button class="primary" data-act="vorlage-neu" data-key="${esc(b.key)}">＋ Neue Vorlage</button>
+    ${liste.some((v) => faelligePerioden(v, heute()).length) ? `<button class="sekundaer" data-act="faellige" data-key="${esc(b.key)}">Fällige jetzt prüfen</button>` : ""}</div>`);
 }
 
 function zeigeVorlageForm(b, id) {
@@ -1040,7 +1458,7 @@ function zeigeVorlageForm(b, id) {
   const ges = (cfg.gesellschafter || []).map((g) => g.name).filter(Boolean);
   const v = (d.vorlagen || []).find((x) => x.id === id) || { rhythmus: "monatlich", start: heute().slice(0, 7), tag: 1, anteil: 100, kategorie: "Telefon, Internet (anteilig)", bezahltVon: gbr ? ges[0] : null, behandlung: gbr ? "sonderbetriebsausgabe" : null };
   modal(`
-    <div class="kopf"><h2>${id ? "Vorlage bearbeiten" : "Neue Vorlage"}</h2><button class="link" data-act="vorlagen" data-key="${b.key}">Zurück</button></div>
+    <div class="kopf"><h2>${id ? "Vorlage bearbeiten" : "Neue Vorlage"}</h2><button class="link" data-act="vorlagen" data-key="${esc(b.key)}">Zurück</button></div>
     <form id="vorlageform">
       <label>Bezeichnung<input name="bezeichnung" value="${esc(v.bezeichnung || "")}" placeholder="z. B. Handy betrieblicher Anteil" required></label>
       <label>Anbieter<input name="partner" value="${esc(v.partner || "")}" placeholder="z. B. Telekom" required></label>
@@ -1187,12 +1605,13 @@ function renderEinstellungen(main) {
         const ohneAdmins = cfg && (!Array.isArray(cfg.admins) || !cfg.admins.length);
         return `
         <li><div><b>${esc(b.name)}</b><small>${b.typ === "gbr" ? "GbR" : "Einzelunternehmen"} · Rolle: ${admin ? "Admin" : "Erfassen"}</small>
-          ${ohneAdmins ? `<small class="warnung">Noch keine Admins festgelegt – bitte unter „Betriebsdaten“ eintragen.</small>` : ""}</div>
+          ${ohneAdmins ? `<small class="warnung">Noch keine Admins festgelegt – bitte unter „Betriebsdaten“ eintragen.</small>` : ""}
+          ${cfg && cfg.typ !== "gbr" && !cfg.inhaber && admin ? `<small class="warnung">Bitte unter „Betriebsdaten“ die Inhaber:in eintragen (für die Homeoffice-Grenze).</small>` : ""}</div>
           <div class="knoepfe">
-          ${admin ? `<button class="link" data-act="cfg" data-key="${b.key}">Betriebsdaten</button>
-          <button class="link" data-act="personen" data-key="${b.key}">Personen freischalten</button>` : ""}
-          <button class="link" data-act="vorlagen" data-key="${b.key}">Wiederkehrende Buchungen</button>
-          <button class="link rot" data-act="trennen" data-key="${b.key}">Trennen</button></div></li>`;
+          ${admin ? `<button class="link" data-act="cfg" data-key="${esc(b.key)}">Betriebsdaten</button>
+          <button class="link" data-act="personen" data-key="${esc(b.key)}">Personen freischalten</button>` : ""}
+          <button class="link" data-act="vorlagen" data-key="${esc(b.key)}">Wiederkehrende Buchungen</button>
+          <button class="link rot" data-act="trennen" data-key="${esc(b.key)}">Trennen</button></div></li>`;
       }).join("")}</ul>`
         : `<p>Noch kein Betrieb verbunden.</p>`}
       <button class="primary" data-act="verbinden">＋ Betriebsordner verbinden</button>
@@ -1307,9 +1726,13 @@ function zeigeConfig(b, neu) {
       <label>Rechtsform<select name="typ">${opt("einzel", "Einzelunternehmen", c.typ)}${opt("gbr", "GbR", c.typ)}</select></label>
       <label>Steuernummer (optional)<input name="steuernummer" value="${esc(c.steuernummer || "")}"></label>
       <label class="check"><input type="checkbox" name="kleinunternehmer" ${c.kleinunternehmer !== false ? "checked" : ""}> Kleinunternehmerregelung (keine Umsatzsteuer)</label>
+      <label data-einzel>Inhaber:in<input name="inhaber" value="${esc(c.inhaber || (S.account && S.account.name) || "")}"></label>
+      <p data-einzel class="klein">Wird für die Homeoffice-Grenze (1.260 € je Person über alle Betriebe) und als Name bei Pauschalen verwendet.</p>
       <fieldset data-gbr>
         <legend>Gesellschafterinnen und Anteile</legend>
         ${ges.map((g, i) => `<div class="zwei"><label>Name<input name="g${i}name" value="${esc(g.name)}"></label><label>Anteil %<input name="g${i}anteil" inputmode="decimal" value="${esc(g.anteil)}"></label></div>`).join("")}
+        <label>Fahrtkosten: Erstattung der GbR je km (€)<input name="fahrtSatz" inputmode="decimal" value="${esc(betragText(fahrtSatz(c)))}"></label>
+        <p class="klein">Zusätzlich setzt die Fahrerin 0,30 €/km als Sonderbetriebsausgabe an. Ein geänderter Satz gilt nur für neu erfasste Fahrten.</p>
       </fieldset>
       <label>Admins (Microsoft-Konto, eine E-Mail-Adresse pro Zeile)
         <textarea name="admins" rows="3" autocapitalize="off" autocorrect="off" spellcheck="false">${esc(admins.join("\n"))}</textarea></label>
@@ -1317,7 +1740,10 @@ function zeigeConfig(b, neu) {
       <div class="aktionen"><button type="submit" class="primary big">Speichern</button></div>
     </form>`);
   const form = modalEl.querySelector("#cfgform");
-  const toggle = () => (form.querySelector("[data-gbr]").style.display = form.typ.value === "gbr" ? "" : "none");
+  const toggle = () => {
+    form.querySelector("[data-gbr]").style.display = form.typ.value === "gbr" ? "" : "none";
+    form.querySelectorAll("[data-einzel]").forEach((el) => (el.style.display = form.typ.value === "gbr" ? "none" : ""));
+  };
   form.typ.addEventListener("change", toggle);
   toggle();
   form.addEventListener("submit", async (ev) => {
@@ -1330,6 +1756,8 @@ function zeigeConfig(b, neu) {
       typ: f.typ,
       steuernummer: f.steuernummer.trim(),
       kleinunternehmer: !!f.kleinunternehmer,
+      inhaber: f.typ === "gbr" ? undefined : (f.inhaber || "").trim(),
+      fahrtErstattungCent: f.typ === "gbr" ? parseBetrag(f.fahrtSatz) : undefined,
       gesellschafter: f.typ === "gbr" ? ges.map((_, i) => ({ name: (f[`g${i}name`] || "").trim(), anteil: parseFloat(String(f[`g${i}anteil`]).replace(",", ".")) || 0 })).filter((g) => g.name) : [],
       admins: [...new Set(String(f.admins || "").split(/[\s,;]+/).map((x) => x.trim().toLowerCase()).filter((x) => x.includes("@")))],
       geaendertVon: ichBin(),
@@ -1337,6 +1765,8 @@ function zeigeConfig(b, neu) {
     };
     if (!cfg.admins.length) return toast("Bitte mindestens eine Admin-Adresse eintragen.", "fehler");
     if (!cfg.admins.includes(meineMail()) && !confirm("Deine eigene Adresse steht nicht in der Admin-Liste. Du kannst die Betriebsdaten danach nicht mehr ändern. Trotzdem speichern?")) return;
+    if (cfg.typ === "gbr" && !(cfg.fahrtErstattungCent >= 0 && cfg.fahrtErstattungCent <= KM_PAUSCHALE_CENT)) return toast("Die Fahrtkosten-Erstattung muss zwischen 0,00 und 0,30 € je km liegen.", "fehler");
+    if (cfg.typ !== "gbr" && !cfg.inhaber) return toast("Bitte Inhaber:in eintragen.", "fehler");
     if (cfg.typ === "gbr") {
       const summe = cfg.gesellschafter.reduce((s, g) => s + g.anteil, 0);
       if (cfg.gesellschafter.length < 2) return toast("Bitte beide Gesellschafterinnen eintragen.", "fehler");
@@ -1388,10 +1818,10 @@ async function zeigePersonen(b) {
     const { name, email } = personAus(p);
     if (roles.includes("owner")) return `<li><div><b>${esc(name || "Besitzerin")}</b><small>Besitzerin</small></div></li>`;
     if (p.link && !name) return `<li><div><b>Freigabelink</b><small>${esc(p.link.scope || "")} · ${roles.includes("write") ? "bearbeiten" : "ansehen"}</small></div>
-      ${p.inheritedFrom ? "" : `<button class="link rot" data-act="perm-weg" data-id="${esc(p.id)}" data-key="${b.key}">Entfernen</button>`}</li>`;
+      ${p.inheritedFrom ? "" : `<button class="link rot" data-act="perm-weg" data-id="${esc(p.id)}" data-key="${esc(b.key)}">Entfernen</button>`}</li>`;
     const istAdm = email && admins.includes(email.toLowerCase());
     return `<li><div><b>${esc(name || email || "Unbekannt")}</b><small>${roles.includes("write") ? "darf erfassen" : "nur ansehen"}${istAdm ? " · Admin" : ""}${p.inheritedFrom ? " · über übergeordneten Ordner" : ""}</small></div>
-      ${p.inheritedFrom ? "" : `<button class="link rot" data-act="perm-weg" data-id="${esc(p.id)}" data-key="${b.key}">Entfernen</button>`}</li>`;
+      ${p.inheritedFrom ? "" : `<button class="link rot" data-act="perm-weg" data-id="${esc(p.id)}" data-key="${esc(b.key)}">Entfernen</button>`}</li>`;
   });
   modal(`
     <div class="kopf"><h2>Personen · ${esc(b.name)}</h2><button class="link" data-act="modal-zu">Schließen</button></div>
@@ -1403,7 +1833,7 @@ async function zeigePersonen(b) {
       <div class="aktionen"><button type="submit" class="primary">Freischalten und Einladung erstellen</button></div>
     </form>
     <p class="klein">OneDrive schickt der Person eine E-Mail. Zusätzlich bekommst du einen Einladungslink für die App, den du ihr schickst.</p>
-    <button class="link" data-act="nur-link" data-key="${b.key}">Nur Einladungslink erzeugen (für Personen, die schon Zugriff haben)</button>`);
+    <button class="link" data-act="nur-link" data-key="${esc(b.key)}">Nur Einladungslink erzeugen (für Personen, die schon Zugriff haben)</button>`);
   modalEl.querySelector("#einladen").addEventListener("submit", async (ev) => {
     ev.preventDefault();
     const email = ev.target.email.value.trim();
@@ -1464,7 +1894,10 @@ document.addEventListener("submit", (ev) => {
   const form = ev.target;
   if (form.id !== "f") return;
   ev.preventDefault();
-  if (form.dataset.editId) speichereBearbeitung(form);
+  if (form.fahrtForm) {
+    if (form.dataset.editId) speichereFahrtBearbeitung(form);
+    else speichereFahrt(form);
+  } else if (form.dataset.editId) speichereBearbeitung(form);
   else speichereNeu(form);
 });
 
@@ -1503,6 +1936,9 @@ document.addEventListener("click", async (ev) => {
       case "foto": camInput.click(); break;
       case "datei": dateiInput.click(); break;
       case "ohne": neuerEntwurf("ohne"); render(); break;
+      case "fahrt": neuerEntwurf("fahrt"); render(); break;
+      case "fahrten-abrechnen": zeigeFahrtenAbrechnen(el.dataset.name); break;
+      case "fahrtenliste": zeigeFahrtenliste(); break;
       case "verwerfen":
         if (confirm("Diesen Beleg verwerfen?")) { S.draft = null; render(); if (S.queue.length) naechsteDatei(); }
         break;
@@ -1586,6 +2022,17 @@ document.addEventListener("click", async (ev) => {
       }
     }
   } catch (e) { fehler(e); }
+});
+
+// Schutzregel (Content Security Policy): blockierte Adressen sichtbar machen, damit fehlende
+// Microsoft-Adressen schnell auffallen
+document.addEventListener("securitypolicyviolation", (ev) => {
+  console.warn("Blockiert:", ev.blockedURI, ev.violatedDirective);
+  if (/^https?:/.test(ev.blockedURI || "")) {
+    let host = ev.blockedURI;
+    try { host = new URL(ev.blockedURI).host; } catch (_) {}
+    toast(`Sicherheitsregel hat eine Verbindung blockiert: ${host}. Falls etwas nicht funktioniert, bitte diese Meldung weitergeben.`, "fehler");
+  }
 });
 
 // ---------------------------------------------------------------------------

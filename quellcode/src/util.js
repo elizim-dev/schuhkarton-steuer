@@ -6,6 +6,9 @@ import { KATEGORIEN_AUSGABE, KATEGORIEN_EINNAHME } from "./config.js";
 export const esc = (s) =>
   String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
+// Nur https-Links zulassen (Links stammen aus Dateien im geteilten Ordner)
+export const safeUrl = (u) => (/^https:\/\//i.test(String(u || "")) ? String(u) : "");
+
 export const heute = () => new Date().toLocaleDateString("sv-SE");
 export const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(16).slice(2));
 
@@ -36,8 +39,9 @@ export function dateiname(e, kurz) {
       .replace(/\s+/g, "-")
       .replace(/-+/g, "-")
       .slice(0, 40) || "ohne-Name";
-  const partner =
-    e.art === "einlage" || e.art === "entnahme" ? (e.art === "einlage" ? "Einlage-" : "Entnahme-") + e.gesellschafterin : e.partner;
+  const partner = e.fahrt
+    ? "Fahrt-" + e.fahrt.fahrerin
+    : e.art === "einlage" || e.art === "entnahme" ? (e.art === "einlage" ? "Einlage-" : "Entnahme-") + e.gesellschafterin : e.partner;
   const prefix = e.eigenbeleg ? "Eigenbeleg_" : "";
   return `${e.belegdatum}_${clean(kurz)}_${prefix}${clean(partner)}_${betragText(e.betragCent)}.pdf`;
 }
@@ -108,6 +112,34 @@ export function eigenbelegPdf(e, betrieb, ersteller) {
     y += 7 * lines.length;
   };
   const artText = { ausgabe: "Ausgabe", einnahme: "Einnahme", einlage: "Einlage", entnahme: "Entnahme" }[e.art];
+  if (e.fahrt) {
+    const f = e.fahrt;
+    const satz = (c) => (c / 100).toLocaleString("de-DE", { minimumFractionDigits: 2 }) + " €";
+    zeile("Betrieb:", betrieb.name);
+    zeile("Art:", "Fahrt mit eigenem Pkw (Fahrzeug im Privatvermögen)");
+    zeile("Fahrtdatum:", datumDE(e.belegdatum));
+    zeile("Fahrerin:", f.fahrerin);
+    zeile("Mitfahrerin:", f.mitfahrerin || "keine");
+    zeile("Strecke:", `${f.start} – ${f.ziel}${f.hinUndZurueck ? " und zurück" : ""}`);
+    zeile("Anlass:", f.anlass);
+    zeile("Gefahrene km:", f.hinUndZurueck ? `2 × ${f.km} km = ${f.kmGesamt} km` : `${f.kmGesamt} km`);
+    y += 3;
+    zeile("Erstattung GbR:", `${f.kmGesamt} km × ${satz(f.satzCent)} = ${euro(e.betragCent)}`);
+    zeile("", e.status === "bezahlt" ? `überwiesen am ${datumDE(e.zahlungsdatum)}` : "Überweisung offen (Abrechnung zum Jahresende)");
+    zeile("", "Betriebsausgabe der GbR; bei der Fahrerin Sonderbetriebseinnahme");
+    zeile("Sonderbetriebs-", `${f.kmGesamt} km × ${satz(f.sbaSatzCent)} = ${euro(f.sbaCent)}`);
+    zeile("ausgabe Fahrerin:", "Pauschale für Fahrten mit dem eigenen Pkw");
+    zeile("Grund Eigenbeleg:", e.eigenbelegGrund);
+    y += 6;
+    zeile("Erstellt von:", ersteller);
+    zeile("Erstellt am:", datumDE(heute()));
+    y += 20;
+    pdf.line(20, y, 100, y);
+    pdf.setFontSize(8);
+    pdf.text("Unterschrift", 20, y + 5);
+    pdf.text("Erstellt mit Schuhkarton Steuer", 20, 287);
+    return pdf.output("blob");
+  }
   zeile("Betrieb:", betrieb.name);
   zeile("Art:", artText);
   zeile("Datum:", datumDE(e.belegdatum));
@@ -162,13 +194,16 @@ export function journalExcel(journal, config) {
         "Bewirtung (Anlass / Teilnehmende / Ort)": e.bewAnlass ? `${e.bewAnlass} / ${e.bewTeilnehmende} / ${e.bewOrt}` : "",
         "Erfasst von": e.erfasstVon || "",
         Datei: e.datei ? e.datei.name : "",
+        Fahrt: e.fahrt
+          ? `${e.fahrt.fahrerin}${e.fahrt.mitfahrerin ? " mit " + e.fahrt.mitfahrerin : ""} · ${e.fahrt.start} – ${e.fahrt.ziel}${e.fahrt.hinUndZurueck ? " und zurück" : ""} · ${e.fahrt.kmGesamt} km · SBA ${(e.fahrt.sbaCent / 100).toFixed(2).replace(".", ",")} €`
+          : "",
       }));
     const ws = XLSX.utils.json_to_sheet(rows);
-    ws["!cols"] = [10, 11, 13, 10, 11, 28, 24, 32, 14, 10, 14, 20, 10, 8, 14, 36, 16, 40].map((w) => ({ wch: w }));
+    ws["!cols"] = [10, 11, 13, 10, 11, 28, 24, 32, 14, 10, 14, 20, 10, 8, 14, 36, 16, 40, 60].map((w) => ({ wch: w }));
     rows.forEach((r, i) => {
       const e = journal.eintraege.find((x) => x.belegnr === r["Beleg-Nr."]);
       const cell = ws[XLSX.utils.encode_cell({ r: i + 1, c: 17 })];
-      if (cell && e && e.datei && e.datei.webUrl) cell.l = { Target: e.datei.webUrl };
+      if (cell && e && e.datei && safeUrl(e.datei.webUrl)) cell.l = { Target: e.datei.webUrl };
     });
     XLSX.utils.book_append_sheet(wb, ws, jahr);
   }
@@ -291,7 +326,7 @@ export async function kiTest(apiKey, modell) {
 }
 
 // --- PDF „EÜR <Jahr>“ ----------------------------------------------------------
-export function euerPdf({ config, jahr, eu, gesellschaft, eintraege, ersteller }) {
+export function euerPdf({ config, jahr, eu, gesellschaft, eintraege, ersteller, fahrten }) {
   const pdf = new jsPDF({ unit: "mm", format: "a4" });
   const L = 18;
   const R = 192;
@@ -343,8 +378,9 @@ export function euerPdf({ config, jahr, eu, gesellschaft, eintraege, ersteller }
       gesellschaft.personen.forEach((p, i) => text(euro(p[key]), R - (gesellschaft.personen.length - 1 - i) * 40, { align: "right" }));
       pdf.setFont(undefined, "normal"); y += 5;
     };
-    gesellschaft.personen.forEach((p) => (p.steuerAnteil = p.gewinnSteuer + p.sba));
+    gesellschaft.personen.forEach((p) => (p.steuerAnteil = p.gewinnSteuer + p.sba - (p.sbe || 0)));
     reihe("Anteil am Gewinn", "steuerAnteil");
+    if (gesellschaft.personen.some((p) => p.sbe)) reihe("+ Sonderbetriebseinnahmen", "sbe");
     reihe("- Sonderbetriebsausgaben", "sba");
     reihe("= Gewinnanteil", "gewinnSteuer", true);
     y += 3; pdf.setFontSize(9); pdf.setFont(undefined, "italic"); text("Informativ (ohne steuerliche Wirkung):", L); pdf.setFont(undefined, "normal"); y += 5;
@@ -352,6 +388,35 @@ export function euerPdf({ config, jahr, eu, gesellschaft, eintraege, ersteller }
     reihe("Entnahmen", "entnahmen");
     reihe("Kapitalkonto", "kapital");
     pdf.setFontSize(10); y += 6;
+  }
+
+  if (fahrten && fahrten.fahrten.length) {
+    neueSeite();
+    pdf.setFontSize(12); pdf.setFont(undefined, "bold"); text(`Fahrtenliste ${jahr}`, L); y += 6;
+    pdf.setFontSize(8); pdf.setFont(undefined, "normal");
+    const satzInfo = pdf.splitTextToSize("Fahrten mit privaten Pkw der Gesellschafterinnen. Erstattung durch die GbR = Betriebsausgabe der GbR und Sonderbetriebseinnahme der Fahrerin (im Jahr der Überweisung); Pauschale 0,30 €/km = Sonderbetriebsausgabe der Fahrerin (im Jahr der Fahrt).", R - L);
+    pdf.text(satzInfo, L, y); y += 4 * satzInfo.length + 3;
+    kopfzeile([["Datum", L], ["Strecke / Anlass", L + 18], ["Fahrerin", L + 88], ["km", L + 134, "right"], ["Erstattung", L + 156, "right"], ["Status", R, "right"]]);
+    for (const e of fahrten.fahrten) {
+      const f = e.fahrt;
+      const strecke = pdf.splitTextToSize(`${f.start} – ${f.ziel}${f.hinUndZurueck ? " u. zurück" : ""}: ${f.anlass}`, 66);
+      const wer = pdf.splitTextToSize(`${f.fahrerin}${f.mitfahrerin ? " (mit " + f.mitfahrerin + ")" : ""}`, 34);
+      const h = 4 * Math.max(strecke.length, wer.length);
+      platz(h + 1);
+      text(datumDE(e.belegdatum), L); pdf.text(strecke, L + 18, y); pdf.text(wer, L + 88, y);
+      text(String(f.kmGesamt).replace(".", ","), L + 134, { align: "right" }); text(euro(e.betragCent), L + 156, { align: "right" });
+      text(e.status === "bezahlt" ? datumDE(e.zahlungsdatum) : "offen", R, { align: "right" });
+      y += h + 1;
+    }
+    y += 3; pdf.line(L, y, R, y); y += 5;
+    pdf.setFontSize(9);
+    kopfzeile([["Je Fahrerin", L], ["Fahrten", L + 70, "right"], ["km", L + 92, "right"], ["SBA 0,30 €/km", L + 124, "right"], ["überwiesen", L + 152, "right"], ["offen", R, "right"]]);
+    for (const p of fahrten.personen) {
+      platz(6);
+      text(p.name, L); text(String(p.anzahl), L + 70, { align: "right" }); text(String(p.km).replace(".", ","), L + 92, { align: "right" });
+      text(euro(p.sba), L + 124, { align: "right" }); text(euro(p.ueberwiesenCent), L + 152, { align: "right" }); text(euro(p.offenCent), R, { align: "right" });
+      y += 5;
+    }
   }
 
   neueSeite();

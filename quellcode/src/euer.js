@@ -69,8 +69,12 @@ export function gesellschafterUebersicht(journal, config, jahr) {
           (e.art === "einlage" && e.gesellschafterin === g.name),
       );
       const entnahmen = s((e) => e.art === "entnahme" && e.gesellschafterin === g.name);
-      const sba = s((e) => e.art === "ausgabe" && e.bezahltVon === g.name && e.behandlung === "sonderbetriebsausgabe");
-      return { name: g.name, anteil: anteile[i], einlagen, entnahmen, sba };
+      // Sonderbetriebsausgaben: privat getragene Kosten (nach Zahlung) + km-Pauschale aus Fahrten (im Jahr der Fahrt)
+      const sbaFahrten = fahrtenJahr(journal, j).filter((e) => e.fahrt.fahrerin === g.name).reduce((a, e) => a + (e.fahrt.sbaCent || 0), 0);
+      const sba = s((e) => e.art === "ausgabe" && e.bezahltVon === g.name && e.behandlung === "sonderbetriebsausgabe") + sbaFahrten;
+      // Sonderbetriebseinnahmen: Fahrtkostenerstattungen der GbR (im Jahr der Überweisung)
+      const sbe = s((e) => e.fahrt && e.fahrt.fahrerin === g.name);
+      return { name: g.name, anteil: anteile[i], einlagen, entnahmen, sba, sbe };
     });
   };
   const aktuell = bewegungen(jahr);
@@ -82,13 +86,42 @@ export function gesellschafterUebersicht(journal, config, jahr) {
     ...p,
     vortrag: vortrag[i],
     kapital: vortrag[i] + p.anteil + p.einlagen - p.entnahmen,
-    gewinnSteuer: steuer[i] - p.sba,
+    gewinnSteuer: steuer[i] + p.sbe - p.sba,
   }));
   const kap = personen.map((p) => p.kapital);
   const differenz = kap.length > 1 ? Math.max(...kap) - Math.min(...kap) : 0;
   // Rundung bei der Gewinnaufteilung: höchstens 1 Cent je einbezogenem Jahr
   const rundungsToleranz = 1 + jahreBis(jahr).length;
   return { personen, differenz, ausgeglichen: differenz <= rundungsToleranz, hatVortrag: vortrag.some((v) => v !== 0) };
+}
+
+// Fahrten (Erfassungsart „Fahrt“, GbR) mit Fahrtdatum im Jahr – unabhängig vom Erstattungsstatus
+export function fahrtenJahr(journal, jahr) {
+  return journal.eintraege.filter((e) => e.fahrt && !e.storniert && (e.belegdatum || "").slice(0, 4) === jahr);
+}
+
+// Fahrten je Fahrerin: Anzahl, km, Sonderbetriebsausgabe, Erstattung offen / überwiesen
+export function fahrtenUebersicht(journal, config, jahr) {
+  const namen = (config.gesellschafter || []).map((g) => g.name).filter(Boolean);
+  const alle = journal.eintraege.filter((e) => e.fahrt && !e.storniert);
+  const imJahr = fahrtenJahr(journal, jahr);
+  const personen = namen.map((name) => {
+    const f = imJahr.filter((e) => e.fahrt.fahrerin === name);
+    // offen: alle noch nicht überwiesenen Fahrten bis einschließlich dieses Jahres
+    const offen = alle.filter((e) => e.fahrt.fahrerin === name && e.status === "offen" && (e.belegdatum || "").slice(0, 4) <= jahr);
+    const ueberwiesen = alle.filter((e) => e.fahrt.fahrerin === name && e.status === "bezahlt" && zahlJahr(e) === jahr);
+    const sum = (arr, fn) => arr.reduce((a, e) => a + fn(e), 0);
+    return {
+      name,
+      anzahl: f.length,
+      km: sum(f, (e) => e.fahrt.kmGesamt || 0),
+      sba: sum(f, (e) => e.fahrt.sbaCent || 0),
+      offen,
+      offenCent: sum(offen, (e) => e.betragCent),
+      ueberwiesenCent: sum(ueberwiesen, (e) => e.betragCent),
+    };
+  });
+  return { personen, fahrten: imJahr.sort((a, b) => a.belegdatum.localeCompare(b.belegdatum)) };
 }
 
 // Fällige Perioden einer wiederkehrenden Buchung bis heute

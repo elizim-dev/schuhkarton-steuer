@@ -1,5 +1,5 @@
 // Feste Konfiguration der App „Schuhkarton Steuer“
-export const VERSION = "1.2.1";
+export const VERSION = "1.3.0";
 
 export const CLIENT_ID = "e15c462d-09ab-471a-bda0-7b7b06581e86";
 export const REGISTERED_REDIRECT = "https://elizim-dev.github.io/schuhkarton-steuer/";
@@ -28,7 +28,10 @@ export const KI_STANDARD = "claude-haiku-5-5";
 // Pauschalen (Stand 2026 – bei Gesetzesänderungen anpassen)
 export const KM_PAUSCHALE_CENT = 30; // 0,30 € je gefahrenem km (Dienstreise, eigener Pkw)
 export const HOMEOFFICE_TAG_CENT = 600; // 6 € je Tag
-export const HOMEOFFICE_MAX_CENT = 126000; // 1.260 € je Jahr
+export const HOMEOFFICE_MAX_CENT = 126000; // 1.260 € je Jahr und Person (alle Tätigkeiten zusammen)
+// Fahrten GbR (Variante 5): Erstattung durch die GbR je km (Standard, in den Betriebsdaten änderbar);
+// die Fahrerin setzt zusätzlich KM_PAUSCHALE_CENT je km als Sonderbetriebsausgabe an
+export const FAHRT_ERSTATTUNG_STANDARD_CENT = 20;
 
 export const KATEGORIEN_EINNAHME = [
   "Betriebseinnahmen (Kleinunternehmer)",

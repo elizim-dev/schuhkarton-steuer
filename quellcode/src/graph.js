@@ -216,6 +216,15 @@ export async function uploadFile(driveId, parentId, name, blob, { overwrite = fa
 
 // --- Freigaben (Personen freischalten) ---------------------------------------
 
+// Inhalt einer vorhandenen Datei ersetzen (z. B. neu erzeugter Eigenbeleg nach Bearbeitung)
+export async function replaceContent(driveId, itemId, blob) {
+  return gj(`${itemPath(driveId, itemId)}/content`, {
+    method: "PUT",
+    headers: { "Content-Type": blob.type || "application/octet-stream" },
+    body: blob,
+  });
+}
+
 export async function invite(driveId, itemId, email, nachricht) {
   return gj(`${itemPath(driveId, itemId)}/invite`, {
     method: "POST",

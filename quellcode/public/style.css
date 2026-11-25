@@ -240,3 +240,9 @@ table.euer tr.gewinn td { font-weight: 700; font-size: 1rem; color: var(--schwar
 .faellig label.check { align-items: flex-start; }
 .betriebe li { flex-direction: column; align-items: stretch; }
 .betriebe .knoepfe { flex-direction: row; flex-wrap: wrap; justify-content: flex-start; gap: 2px 12px; align-items: center; }
+/* 1.3: Fahrten */
+label.check.unten { align-self: end; min-height: 44px; }
+.fahrt-rechnung { background: var(--gruen-hell, #E4EFE8); border-radius: 10px; padding: 4px 12px; margin: 6px 0 4px; }
+.fahrt-rechnung:empty { display: none; }
+.fahrt-rechnung table.uebersicht td:first-child { width: 70%; }
+ul.liste.kompakt li { padding: 6px 0; }
