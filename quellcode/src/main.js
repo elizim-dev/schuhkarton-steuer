@@ -2026,12 +2026,14 @@ document.addEventListener("click", async (ev) => {
 
 // Schutzregel (Content Security Policy): blockierte Adressen sichtbar machen, damit fehlende
 // Microsoft-Adressen schnell auffallen
+const blockiert = new Set();
 document.addEventListener("securitypolicyviolation", (ev) => {
   console.warn("Blockiert:", ev.blockedURI, ev.violatedDirective);
   if (/^https?:/.test(ev.blockedURI || "")) {
     let host = ev.blockedURI;
     try { host = new URL(ev.blockedURI).host; } catch (_) {}
-    toast(`Sicherheitsregel hat eine Verbindung blockiert: ${host}. Falls etwas nicht funktioniert, bitte diese Meldung weitergeben.`, "fehler");
+    blockiert.add(`${host} (${String(ev.effectiveDirective || ev.violatedDirective).split(" ")[0]})`);
+    toast(`Sicherheitsregel hat blockiert: ${[...blockiert].join(", ")}. Bitte diese Meldung an Claude weitergeben.`, "fehler");
   }
 });
 
@@ -2050,7 +2052,7 @@ document.addEventListener("securitypolicyviolation", (ev) => {
     await ladeVerbindungen();
     if (!aktiv() && S.betriebe.length) { S.active = S.betriebe[0].key; speichereBetriebe(); }
     for (const b of S.betriebe) {
-      try { await ladeBetrieb(b, true); } catch (e) { console.warn(e); if (b === aktiv()) fehler(e); }
+      try { await ladeBetrieb(b, true); } catch (e) { console.warn(e); toast(`„${b.name}“ konnte nicht geladen werden: ${e.message || e}`, "fehler"); }
     }
     busy(null);
     if (!aktiv()) S.view = "einstellungen";

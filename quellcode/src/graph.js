@@ -41,7 +41,8 @@ async function token() {
     const r = await msal.acquireTokenSilent({ scopes: SCOPES, account });
     return r.accessToken;
   } catch (e) {
-    if (e instanceof InteractionRequiredAuthError) {
+    // Anmeldung abgelaufen oder stille Verlängerung im Hintergrund gescheitert (z. B. Safari) → neu anmelden
+    if (e instanceof InteractionRequiredAuthError || /timeout|timed_out|iframe/i.test(String(e && e.errorCode))) {
       await msal.acquireTokenRedirect({ scopes: SCOPES, account });
       throw new Error("Anmeldung wird erneuert …");
     }
