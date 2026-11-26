@@ -41,7 +41,7 @@ export function dateiname(e, kurz) {
       .slice(0, 40) || "ohne-Name";
   const partner = e.fahrt
     ? "Fahrt-" + e.fahrt.fahrerin
-    : e.art === "einlage" || e.art === "entnahme" ? (e.art === "einlage" ? "Einlage-" : "Entnahme-") + e.gesellschafterin : e.partner;
+    : e.art === "einlage" || e.art === "entnahme" ? (e.art === "einlage" ? "Einlage-" : e.entnahmeArt === "gewinn" ? "Gewinnauszahlung-" : "Entnahme-") + e.gesellschafterin : e.partner;
   const prefix = e.eigenbeleg ? "Eigenbeleg_" : "";
   return `${e.belegdatum}_${clean(kurz)}_${prefix}${clean(partner)}_${betragText(e.betragCent)}.pdf`;
 }
@@ -386,6 +386,7 @@ export function euerPdf({ config, jahr, eu, gesellschaft, eintraege, ersteller, 
     y += 3; pdf.setFontSize(9); pdf.setFont(undefined, "italic"); text("Informativ (ohne steuerliche Wirkung):", L); pdf.setFont(undefined, "normal"); y += 5;
     reihe("Einlagen", "einlagen");
     reihe("Entnahmen", "entnahmen");
+    if (gesellschaft.personen.some((p) => p.gewinnAusz)) reihe("  davon Gewinnauszahlungen", "gewinnAusz");
     reihe("Kapitalkonto", "kapital");
     pdf.setFontSize(10); y += 6;
   }

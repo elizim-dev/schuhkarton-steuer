@@ -1,5 +1,5 @@
 // Feste Konfiguration der App „Schuhkarton Steuer“
-export const VERSION = "1.3.1";
+export const VERSION = "1.4.0";
 
 export const CLIENT_ID = "e15c462d-09ab-471a-bda0-7b7b06581e86";
 export const REGISTERED_REDIRECT = "https://elizim-dev.github.io/schuhkarton-steuer/";
@@ -89,6 +89,7 @@ export const GWG_GRENZE_BRUTTO_CENT = 95200; // 800 € netto + 19 % USt
 export const KU_GRENZE_VORJAHR_CENT = 2500000;
 export const KU_GRENZE_LAUFEND_CENT = 10000000;
 export const VORLAGEN_FILE = "schuhkarton-vorlagen.json";
+export const LOESCHPROTOKOLL_FILE = "schuhkarton-loeschprotokoll.json";
 
 
 export const EIGENBELEG_GRUENDE = [

@@ -3,7 +3,7 @@ import {
   VERSION, CONFIG_FILE, JOURNAL_FILE, BELEGE_FOLDER, KI_MODELLE, KI_STANDARD, VERBINDUNGEN_FILE, REDIRECT_URI,
   KATEGORIEN_AUSGABE, KATEGORIEN_EINNAHME, EIGENBELEG_GRUENDE,
   KM_PAUSCHALE_CENT, HOMEOFFICE_TAG_CENT, HOMEOFFICE_MAX_CENT,
-  GWG_GRENZE_BRUTTO_CENT, KU_GRENZE_VORJAHR_CENT, KU_GRENZE_LAUFEND_CENT, VORLAGEN_FILE, FAHRT_ERSTATTUNG_STANDARD_CENT,
+  GWG_GRENZE_BRUTTO_CENT, KU_GRENZE_VORJAHR_CENT, KU_GRENZE_LAUFEND_CENT, VORLAGEN_FILE, FAHRT_ERSTATTUNG_STANDARD_CENT, LOESCHPROTOKOLL_FILE,
 } from "./config.js";
 import { aufteilen, migriereKategorien, euer, ergebnis, gesellschafterUebersicht, faelligePerioden, zahlJahr, fahrtenUebersicht } from "./euer.js";
 import * as G from "./graph.js";
@@ -27,7 +27,7 @@ const S = {
   active: ls.get("sk_active", null),
   data: {},            // key -> { config, journal, etag }
   jahr: String(new Date().getFullYear()),
-  filter: { monat: "", kat: "", q: "" },
+  filter: { monat: "", kat: "", q: "", storno: false },
   draft: null,
   queue: [],
   browser: null,
@@ -326,6 +326,7 @@ function renderLogin() {
       <p>Belege fotografieren, ablegen und die EÜR vorbereiten.</p>
       ${ls.get("sk_einladung", null) ? `<p class="hinweis">Du wurdest eingeladen. Melde dich mit deinem Microsoft-Konto an – der Betrieb wird danach automatisch verbunden.</p>` : ""}
       <button class="primary big" data-act="login">Mit Microsoft anmelden</button>
+      <p class="klein">Tipp: Fragt Microsoft „Angemeldet bleiben?“, mit <b>Ja</b> bestätigen – dann musst du dich seltener anmelden.</p>
       <p class="klein">Die Belege bleiben in deinem OneDrive.</p>
     </section>`;
 }
@@ -423,7 +424,7 @@ function formular(v, { neu, ohne, unsicher = [] }) {
     <label data-show="partner" class="${u("partner")}"><span data-lbl="partner">Lieferant</span><input name="partner" value="${esc(v.partner || "")}"></label>
     <label data-show="gesellschafterin">Gesellschafterin<select name="gesellschafterin">${ges.map((n) => opt(n, n, v.gesellschafterin)).join("")}</select></label>
     <label data-show="entnahmeArt">Art der Entnahme<select name="entnahmeArt">
-      ${opt("erstattung", "Erstattung vorgestreckter Ausgaben", v.entnahmeArt)}${opt("privat", "Privatentnahme", v.entnahmeArt)}
+      ${opt("erstattung", "Erstattung vorgestreckter Ausgaben", v.entnahmeArt)}${opt("privat", "Privatentnahme", v.entnahmeArt)}${opt("gewinn", "Gewinnauszahlung", v.entnahmeArt)}
     </select></label>
     <label data-show="kategorie" class="${u("kategorie")}">Kategorie<select name="kategorie"></select></label>
     <label>Beschreibung<input name="beschreibung" value="${esc(v.beschreibung || "")}" placeholder="z. B. Jahresabo Zoom"></label>
@@ -977,7 +978,9 @@ function renderJournal(main) {
   const alle = eintraegeJahr();
   const f = S.filter;
   const q = f.q.toLowerCase();
+  const ausgeblendet = f.storno ? 0 : alle.filter((e) => e.storniert).length;
   const liste = alle
+    .filter((e) => f.storno || !e.storniert)
     .filter((e) => !f.monat || (e.zahlungsdatum || e.belegdatum).slice(5, 7) === f.monat)
     .filter((e) => !f.kat || e.kategorie === f.kat)
     .filter((e) => !q || [e.partner, e.beschreibung, e.kategorie, e.belegnr, e.gesellschafterin, e.rechnungsnr].join(" ").toLowerCase().includes(q))
@@ -1012,7 +1015,9 @@ function renderJournal(main) {
         <select data-flt="kat">${opt("", "Alle Kategorien", f.kat)}${[...KATEGORIEN_EINNAHME, ...KATEGORIEN_AUSGABE].map((k) => opt(k, k, f.kat)).join("")}</select>
         <input data-flt="q" placeholder="Suchen …" value="${esc(f.q)}">
       </div>
+      <label class="check klein-check"><input type="checkbox" data-flt-check="storno" ${f.storno ? "checked" : ""}> Stornierte anzeigen${ausgeblendet ? ` (${ausgeblendet} ausgeblendet)` : ""}</label>
       ${liste.length ? `<ul class="liste">${liste.map(zeile).join("")}</ul>` : `<p class="leer">Keine Einträge.</p>`}
+      ${istAdmin(cfg) ? `<p class="klein"><button class="link" data-act="loeschprotokoll">Löschprotokoll ansehen</button></p>` : ""}
     </section>`;
 }
 
@@ -1047,13 +1052,15 @@ function gbrUebersicht(d, cfg, r) {
         ${g.hatVortrag ? reihe("Vortrag aus Vorjahren", g.personen.map((p) => p.vortrag)) : ""}
         ${reihe("+ Einlagen", g.personen.map((p) => p.einlagen))}
         ${reihe("− Entnahmen", g.personen.map((p) => p.entnahmen))}
+        ${g.personen.some((p) => p.gewinnAusz) ? reihe('<span class="einzug">davon Gewinn&shy;auszahlungen</span>', g.personen.map((p) => p.gewinnAusz), "davon") : ""}
         ${reihe("= Kapitalkonto", g.personen.map((p) => p.kapital), "summe")}
         <tr><td colspan="${ges.length + 1}" class="erl">${g.hatVortrag ? "Vortrag + " : ""}Überschussanteil + Einlagen − Entnahmen</td></tr>
       </table>
       <div class="ausgleich ${ausgeglichen ? "ok" : "neutral"}" data-act="ausgleich-info">
         ${ausgeglichen ? "✓ Kapitalkonten ausgeglichen" : `Die Kapitalkonten weichen um ${euro(g.differenz)} voneinander ab.`}
-        ${ausgeglichen ? "" : `<div class="ausgleich-info" hidden>Ausgleichen lässt sich das durch eine Einlage der Gesellschafterin mit dem niedrigeren Stand oder eine Entnahme der Gesellschafterin mit dem höheren Stand. Ob und wann ihr ausgleicht, vereinbart ihr untereinander – steuerlich spielt es keine Rolle.</div>`}
+        ${ausgeglichen ? "" : `<div class="ausgleich-info" hidden>Ausgleichen lässt sich das durch eine Einlage der Gesellschafterin mit dem niedrigeren Stand oder eine Entnahme der Gesellschafterin mit dem höheren Stand – am einfachsten bei der nächsten Gewinnauszahlung („Kapitalkonten dabei ausgleichen“). Ob und wann ihr ausgleicht, vereinbart ihr untereinander – steuerlich spielt es keine Rolle.</div>`}
       </div>
+      <div class="aktionen"><button class="sekundaer" data-act="gewinn-auszahlen">Gewinn auszahlen</button></div>
       <table class="uebersicht steuer">
         ${g.personen.some((p) => p.sbe) ? reihe("+ Sonderbetriebs&shy;einnahmen", g.personen.map((p) => p.sbe)) : ""}
         ${reihe("− Sonderbetriebs&shy;ausgaben", g.personen.map((p) => p.sba))}
@@ -1065,6 +1072,106 @@ function gbrUebersicht(d, cfg, r) {
 
 const vorname = (name) => String(name || "").trim().split(/\s+/)[0];
 
+// Gewinnauszahlung: Gesamtbetrag nach Anteilen aufteilen, auf Wunsch so, dass die Kapitalkonten danach ausgeglichen sind
+function gewinnAufteilung(totalCent, ausgleichen, g, ges) {
+  const summeAnteile = ges.reduce((a, x) => a + (Number(x.anteil) || 0), 0) || ges.length;
+  const w = ges.map((x) => (Number(x.anteil) || summeAnteile / ges.length) / summeAnteile);
+  if (!ausgleichen) return { betraege: aufteilen(totalCent, ges), minCent: 0 };
+  const kap = g.personen.map((p) => p.kapital);
+  const summeKap = kap.reduce((a, k) => a + k, 0);
+  // Kapitalkonto danach = Anteil × (Summe Kapital − Auszahlung) → Auszahlung je Person = Kapital − das
+  const roh = kap.map((k, i) => k - w.at(i) * (summeKap - totalCent));
+  const betraege = roh.map((x) => Math.round(x));
+  betraege[0] += totalCent - betraege.reduce((a, x) => a + x, 0); // Rundungscent
+  const minCent = Math.max(0, Math.ceil(Math.max(...kap.map((k, i) => summeKap - k / w.at(i)))));
+  return { betraege, minCent };
+}
+
+function zeigeGewinnAuszahlen() {
+  const d = aktivData();
+  const cfg = d.config;
+  const ges = (cfg.gesellschafter || []).filter((x) => x.name);
+  const g = gesellschafterUebersicht(d.journal, cfg, S.jahr);
+  const vorschlagDatum = heute().slice(0, 4) === S.jahr ? heute() : `${S.jahr}-12-31`;
+  modal(`
+    <div class="kopf"><h2>Gewinn auszahlen</h2><button class="link" data-act="modal-zu">Abbrechen</button></div>
+    <form id="gewinnform">
+      <label>Gesamtbetrag (€)<input name="betrag" inputmode="decimal" placeholder="z. B. 2.000,00" required></label>
+      <label>Überwiesen am<input type="date" name="datum" value="${esc(vorschlagDatum)}" required></label>
+      ${g.ausgeglichen ? "" : `<label class="check"><input type="checkbox" name="ausgleichen"> Kapitalkonten dabei ausgleichen (Unterschied ${euro(g.differenz)})</label>`}
+      <div data-lbl="vorschau"></div>
+      <p class="klein">Erst überweisen, dann hier eintragen. Die App legt je Gesellschafterin eine Entnahme „Gewinnauszahlung“ mit Eigenbeleg an. Steuerlich ändert eine Auszahlung nichts – versteuert wird der Gewinnanteil.</p>
+      <div class="aktionen"><button type="submit" class="primary big">Auszahlung buchen</button></div>
+    </form>`);
+  const form = modalEl.querySelector("#gewinnform");
+  const berechne = () => {
+    const total = parseBetrag(form.betrag.value);
+    const aus = !!(form.ausgleichen && form.ausgleichen.checked);
+    if (!(total > 0)) { form.querySelector('[data-lbl="vorschau"]').innerHTML = ""; return null; }
+    const r = gewinnAufteilung(total, aus, g, ges);
+    form.querySelector('[data-lbl="vorschau"]').innerHTML = `
+      <table class="uebersicht">
+        <tr><td></td>${ges.map((x) => `<th>${esc(vorname(x.name))}</th>`).join("")}</tr>
+        <tr><td>Auszahlung</td>${r.betraege.map((c) => `<td>${euro(c)}</td>`).join("")}</tr>
+        <tr class="summe"><td>Kapitalkonto danach</td>${g.personen.map((p, i) => `<td>${euro(p.kapital - r.betraege.at(i))}</td>`).join("")}</tr>
+      </table>
+      ${aus && total < r.minCent ? `<p class="hinweis rotf">Für einen vollständigen Ausgleich muss der Betrag mindestens ${euro(r.minCent)} sein.</p>` : ""}`;
+    return { total, aus, ...r };
+  };
+  form.addEventListener("input", berechne);
+  form.addEventListener("change", berechne);
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const r = berechne();
+    if (!r) return toast("Bitte einen Betrag eingeben.", "fehler");
+    if (r.aus && r.total < r.minCent) return toast(`Für den Ausgleich mindestens ${euro(r.minCent)} – oder ohne Ausgleich auszahlen.`, "fehler");
+    if (r.betraege.some((c) => c < 0)) return toast("Ein Anteil wäre negativ.", "fehler");
+    const datum = form.datum.value;
+    if (!datum) return;
+    await bucheGewinnauszahlung(ges, r, datum);
+  });
+}
+
+async function bucheGewinnauszahlung(ges, r, datum) {
+  const b = aktiv();
+  const dat = aktivData();
+  busy("Buche Gewinnauszahlung …");
+  try {
+    await ladeBetrieb(b, true);
+    const jahr = datum.slice(0, 4);
+    const ordner = await G.ensurePath(b.driveId, b.itemId, [BELEGE_FOLDER, jahr]);
+    const neu = [];
+    for (let i = 0; i < ges.length; i++) {
+      const c = r.betraege.at(i);
+      if (!(c > 0)) continue;
+      const e = {
+        id: uuid(), art: "entnahme", belegdatum: datum, betragCent: c, partner: "", kategorie: "",
+        beschreibung: `Gewinnauszahlung (gesamt ${euro(r.total)}${r.aus ? ", mit Ausgleich der Kapitalkonten" : ""})`,
+        rechnungsnr: "", status: "bezahlt", zahlungsdatum: datum, bezahltVon: null, behandlung: null,
+        gesellschafterin: ges.at(i).name, entnahmeArt: "gewinn",
+        eigenbelegGrund: EIGENBELEG_GRUENDE[3], pauschale: null, gesamtCent: null, anteilProzent: null,
+        bewAnlass: null, bewTeilnehmende: null, bewOrt: null,
+        eigenbeleg: true, erfasstVon: ichBin(), erfasstAm: new Date().toISOString(), storniert: false, historie: [],
+      };
+      e.belegnr = naechsteBelegnr({ eintraege: [...S.data[b.key].journal.eintraege, ...neu] }, jahr);
+      const item = await G.uploadFile(b.driveId, ordner, dateiname(e, dat.config.kurz), eigenbelegPdf(e, dat.config, ichBin()));
+      e.datei = { id: item.id, name: item.name, webUrl: item.webUrl, driveId: b.driveId };
+      neu.push(e);
+    }
+    await updateJournal(b, (j) => {
+      for (const e of neu) {
+        if (j.eintraege.some((x) => x.belegnr === e.belegnr)) e.belegnr = naechsteBelegnr(j, jahr);
+        j.eintraege.push(e);
+      }
+    });
+    await excelSpiegeln(b);
+    busy(null);
+    closeModal();
+    toast(`Gewinnauszahlung gebucht (${neu.map((e) => e.belegnr).join(", ")})`);
+    render();
+  } catch (err) { fehler(err); }
+}
+
 function personKlasse(name) {
   const ges = ((aktivData() && aktivData().config.gesellschafter) || []).map((g) => g.name);
   const i = ges.indexOf(name);
@@ -1075,7 +1182,7 @@ function zeile(e) {
   const minus = e.art === "ausgabe" || e.art === "entnahme";
   const titel = e.fahrt
     ? `Fahrt ${e.fahrt.start} – ${e.fahrt.ziel}`
-    : e.partner || (e.art === "einlage" ? `Einlage ${e.gesellschafterin}` : `Entnahme ${e.gesellschafterin}`);
+    : e.partner || (e.art === "einlage" ? `Einlage ${e.gesellschafterin}` : `${e.entnahmeArt === "gewinn" ? "Gewinnauszahlung" : "Entnahme"} ${e.gesellschafterin}`);
   const badges = [];
   if (e.storniert) badges.push(`<i class="b rot">storniert</i>`);
   if (e.status === "offen") badges.push(`<i class="b">${e.fahrt ? "Erstattung offen" : "offen"}</i>`);
@@ -1086,7 +1193,7 @@ function zeile(e) {
   if (e.behandlung === "erstattung") pb("vorgestreckt", e.bezahltVon);
   if (e.behandlung === "sonderbetriebsausgabe") pb("SBA", e.bezahltVon);
   if (e.art === "einlage") pb("Einlage", e.gesellschafterin);
-  if (e.art === "entnahme") pb(e.entnahmeArt === "erstattung" ? "Erstattung" : "Entnahme", e.gesellschafterin);
+  if (e.art === "entnahme") pb({ erstattung: "Erstattung", gewinn: "Gewinnauszahlung" }[e.entnahmeArt] || "Entnahme", e.gesellschafterin);
   if (e.fahrt) pb(`Fahrt ${String(e.fahrt.kmGesamt).replace(".", ",")} km`, e.fahrt.fahrerin);
   return `<li data-act="detail" data-id="${esc(e.id)}" class="${e.storniert ? "storno" : ""}">
     <div class="l1"><span>${esc(titel)}</span><b><i class="punkt ${minus ? "aus" : "ein"}"></i>${minus ? "−" : "+"}${euro(e.betragCent)}</b></div>
@@ -1124,7 +1231,7 @@ function zeigeDetail(id) {
       ${reihe("Rechnungs-Nr.", esc(e.rechnungsnr))}
       ${reihe("Bezahlt von", e.bezahltVon && e.bezahltVon !== "betrieb" ? esc(e.bezahltVon) + " privat" : "")}
       ${reihe("Behandlung", esc({ einlage: "Einlage", erstattung: "wird erstattet", sonderbetriebsausgabe: "Sonderbetriebsausgabe" }[e.behandlung] || ""))}
-      ${reihe("Entnahme", esc({ erstattung: "Erstattung", privat: "Privatentnahme" }[e.entnahmeArt] || ""))}
+      ${reihe("Entnahme", esc({ erstattung: "Erstattung", privat: "Privatentnahme", gewinn: "Gewinnauszahlung" }[e.entnahmeArt] || ""))}
       ${reihe("Eigenbeleg", e.eigenbeleg ? esc(e.eigenbelegGrund) + (e.pauschale ? `<br><small>${esc(e.pauschale)}</small>` : "") : "")}`}
       ${reihe("Beleg-Nr.", esc(e.belegnr))}
       ${reihe("Erfasst", `${esc(e.erfasstVon)}, ${new Date(e.erfasstAm).toLocaleString("de-DE")}`)}
@@ -1135,6 +1242,7 @@ function zeigeDetail(id) {
       ${e.datei && safeUrl(e.datei.webUrl) ? `<a class="sekundaer btn" href="${esc(safeUrl(e.datei.webUrl))}" target="_blank" rel="noopener">📄 Beleg öffnen</a>` : ""}
       ${!e.storniert ? `<button class="sekundaer" data-act="bearbeiten" data-id="${esc(e.id)}">Bearbeiten</button>
       <button class="gefahr" data-act="storno" data-id="${esc(e.id)}">Stornieren</button>` : ""}
+      ${istAdmin(aktivData().config) ? `<button class="gefahr" data-act="loeschen" data-id="${esc(e.id)}">Löschen</button>` : ""}
     </div>`);
 }
 
@@ -1186,6 +1294,68 @@ async function speichereBearbeitung(form) {
     toast("Änderungen gespeichert");
     render();
   } catch (err) { fehler(err); }
+}
+
+// Löschen (nur Admins): für Testbuchungen und echte Fehleingaben. Jede Löschung steht im Löschprotokoll,
+// damit Lücken in den Belegnummern erklärbar bleiben.
+async function loesche(id) {
+  const b = aktiv();
+  const d = aktivData();
+  if (!istAdmin(d.config)) return toast("Löschen dürfen nur Admins.", "fehler");
+  const e = d.journal.eintraege.find((x) => x.id === id);
+  if (!e) return;
+  const grund = prompt(`${e.belegnr} endgültig löschen?\n\nNur für Testbuchungen und echte Fehleingaben – sonst bitte „Stornieren“.\n\nGrund (Pflicht, steht im Löschprotokoll):`);
+  if (grund === null) return;
+  if (!grund.trim()) return toast("Ohne Grund wird nichts gelöscht.", "fehler");
+  if (!confirm(`${e.belegnr} (${euro(e.betragCent)}) wird aus Journal und Excel entfernt, die Belegdatei kommt in den OneDrive-Papierkorb.\n\nWirklich löschen?`)) return;
+  busy("Lösche …");
+  try {
+    // 1. Löschprotokoll zuerst – so ist die Löschung auch dokumentiert, falls danach etwas scheitert
+    const eintrag = {
+      am: new Date().toISOString(), von: ichBin(), grund: grund.trim(),
+      belegnr: e.belegnr, art: e.art, belegdatum: e.belegdatum, zahlungsdatum: e.zahlungsdatum || null,
+      betragCent: e.betragCent, partner: e.partner || e.gesellschafterin || "", kategorie: e.kategorie || "",
+      beschreibung: e.beschreibung || "", storniert: !!e.storniert, datei: e.datei ? e.datei.name : null,
+    };
+    for (let i = 0; i < 4; i++) {
+      const pr = await G.readJson(b.driveId, b.itemId, LOESCHPROTOKOLL_FILE);
+      const data = pr.data || { version: 1, eintraege: [] };
+      data.eintraege.push(eintrag);
+      try { await G.writeJson(b.driveId, b.itemId, LOESCHPROTOKOLL_FILE, data, pr.etag); break; } catch (er) {
+        if (er.status === 412 && i < 3) continue;
+        throw er;
+      }
+    }
+    // 2. aus dem Journal entfernen
+    await updateJournal(b, (j) => { j.eintraege = j.eintraege.filter((x) => x.id !== id); });
+    // 3. Belegdatei in den Papierkorb
+    let dateiHinweis = "";
+    if (e.datei && e.datei.id) {
+      try { await G.deleteItem(e.datei.driveId || b.driveId, e.datei.id); } catch (er) {
+        console.warn(er);
+        dateiHinweis = ` Die Belegdatei „${e.datei.name}“ konnte nicht gelöscht werden – bitte in OneDrive selbst löschen.`;
+      }
+    }
+    await excelSpiegeln(b);
+    busy(null);
+    closeModal();
+    toast(`${e.belegnr} gelöscht und im Löschprotokoll vermerkt.${dateiHinweis}`, dateiHinweis ? "warn" : undefined);
+    render();
+  } catch (err) { fehler(err); }
+}
+
+async function zeigeLoeschprotokoll() {
+  const b = aktiv();
+  busy("Lade Löschprotokoll …");
+  let liste = [];
+  try { liste = ((await G.readJson(b.driveId, b.itemId, LOESCHPROTOKOLL_FILE)).data || {}).eintraege || []; } catch (er) { return fehler(er); }
+  busy(null);
+  modal(`
+    <div class="kopf"><h2>Löschprotokoll</h2><button class="link" data-act="modal-zu">Schließen</button></div>
+    <p class="klein">Gelöschte Buchungen von „${esc(aktivData().config.name)}“. Die Datei <code>${esc(LOESCHPROTOKOLL_FILE)}</code> liegt im Betriebsordner.</p>
+    ${liste.length ? `<ul class="liste">${liste.slice().reverse().map((x) => `<li><div class="l1"><span><b>${esc(x.belegnr)}</b> · ${esc(x.partner)}</span><b>${euro(x.betragCent)}</b></div>
+      <div class="l2">${datumDE(x.belegdatum)} · gelöscht am ${new Date(x.am).toLocaleString("de-DE")} von ${esc(x.von)}</div>
+      <div class="l2">Grund: ${esc(x.grund)}</div></li>`).join("")}</ul>` : `<p class="leer">Noch nichts gelöscht.</p>`}`);
 }
 
 async function storniere(id) {
@@ -1905,6 +2075,7 @@ document.addEventListener("change", (ev) => {
   const t = ev.target;
   if (t.dataset.act === "jahr") { S.jahr = t.value; render(); }
   if (t.dataset.flt) { S.filter[t.dataset.flt] = t.value; render(); }
+  if (t.dataset.fltCheck) { S.filter[t.dataset.fltCheck] = t.checked; render(); }
 });
 document.addEventListener("input", (ev) => {
   const t = ev.target;
@@ -1939,6 +2110,9 @@ document.addEventListener("click", async (ev) => {
       case "fahrt": neuerEntwurf("fahrt"); render(); break;
       case "fahrten-abrechnen": zeigeFahrtenAbrechnen(el.dataset.name); break;
       case "fahrtenliste": zeigeFahrtenliste(); break;
+      case "loeschen": loesche(el.dataset.id); break;
+      case "loeschprotokoll": zeigeLoeschprotokoll(); break;
+      case "gewinn-auszahlen": zeigeGewinnAuszahlen(); break;
       case "verwerfen":
         if (confirm("Diesen Beleg verwerfen?")) { S.draft = null; render(); if (S.queue.length) naechsteDatei(); }
         break;
@@ -2048,11 +2222,21 @@ document.addEventListener("securitypolicyviolation", (ev) => {
     toast("Anmeldung fehlgeschlagen: " + e.message, "fehler");
   }
   if (S.account) {
+    busy("Prüfe Anmeldung …");
+    try { await G.anmeldungPruefen(); } catch (e) {
+      // abgelaufen → die App ist bereits auf dem Weg zu Microsoft und kommt gleich zurück
+      if (e.umleitung) { busy("Anmeldung wird erneuert …"); return; }
+      console.warn(e);
+    }
     busy("Lade Daten …");
     await ladeVerbindungen();
     if (!aktiv() && S.betriebe.length) { S.active = S.betriebe[0].key; speichereBetriebe(); }
     for (const b of S.betriebe) {
-      try { await ladeBetrieb(b, true); } catch (e) { console.warn(e); toast(`„${b.name}“ konnte nicht geladen werden: ${e.message || e}`, "fehler"); }
+      try { await ladeBetrieb(b, true); } catch (e) {
+        console.warn(e);
+        if (e.umleitung) { busy("Anmeldung wird erneuert …"); return; }
+        toast(`„${b.name}“ konnte nicht geladen werden: ${e.message || e}`, "fehler");
+      }
     }
     busy(null);
     if (!aktiv()) S.view = "einstellungen";

@@ -69,12 +69,13 @@ export function gesellschafterUebersicht(journal, config, jahr) {
           (e.art === "einlage" && e.gesellschafterin === g.name),
       );
       const entnahmen = s((e) => e.art === "entnahme" && e.gesellschafterin === g.name);
+      const gewinnAusz = s((e) => e.art === "entnahme" && e.entnahmeArt === "gewinn" && e.gesellschafterin === g.name);
       // Sonderbetriebsausgaben: privat getragene Kosten (nach Zahlung) + km-Pauschale aus Fahrten (im Jahr der Fahrt)
       const sbaFahrten = fahrtenJahr(journal, j).filter((e) => e.fahrt.fahrerin === g.name).reduce((a, e) => a + (e.fahrt.sbaCent || 0), 0);
       const sba = s((e) => e.art === "ausgabe" && e.bezahltVon === g.name && e.behandlung === "sonderbetriebsausgabe") + sbaFahrten;
       // Sonderbetriebseinnahmen: Fahrtkostenerstattungen der GbR (im Jahr der Überweisung)
       const sbe = s((e) => e.fahrt && e.fahrt.fahrerin === g.name);
-      return { name: g.name, anteil: anteile[i], einlagen, entnahmen, sba, sbe };
+      return { name: g.name, anteil: anteile[i], einlagen, entnahmen, gewinnAusz, sba, sbe };
     });
   };
   const aktuell = bewegungen(jahr);

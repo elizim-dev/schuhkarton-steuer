@@ -75,6 +75,8 @@ export async function uploadFile(d, pid, name, blob, { overwrite = false } = {})
   return it;
 }
 export async function replaceContent(d, id, blob) { items[id].size = blob.size; items[id].ersetzt = (items[id].ersetzt || 0) + 1; return items[id]; }
+export async function anmeldungPruefen() {}
+export async function deleteItem(d, id) { if (!items[id]) throw new Error("nicht gefunden"); items[id].papierkorb = true; delete items[id]; }
 export async function renameItem(d, id, name) { items[id].name = name; items[id].webUrl = "https://onedrive.example/" + encodeURIComponent(name); return items[id]; }
 export async function g() { throw new Error("nicht im Test"); }
 export async function gj() { throw new Error("nicht im Test"); }

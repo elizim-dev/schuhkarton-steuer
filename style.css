@@ -246,3 +246,7 @@ label.check.unten { align-self: end; min-height: 44px; }
 .fahrt-rechnung:empty { display: none; }
 .fahrt-rechnung table.uebersicht td:first-child { width: 70%; }
 ul.liste.kompakt li { padding: 6px 0; }
+/* 1.4 */
+label.klein-check { font-size: 14px; margin-top: 8px; }
+table.uebersicht tr.davon td { font-size: 13px; color: var(--text); opacity: .8; }
+table.uebersicht .einzug { padding-left: 12px; }

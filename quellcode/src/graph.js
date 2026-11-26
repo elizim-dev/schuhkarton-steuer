@@ -44,10 +44,17 @@ async function token() {
     // Anmeldung abgelaufen oder stille Verlängerung im Hintergrund gescheitert (z. B. Safari) → neu anmelden
     if (e instanceof InteractionRequiredAuthError || /timeout|timed_out|iframe/i.test(String(e && e.errorCode))) {
       await msal.acquireTokenRedirect({ scopes: SCOPES, account });
-      throw new Error("Anmeldung wird erneuert …");
+      const err = new Error("Anmeldung wird erneuert …");
+      err.umleitung = true;
+      throw err;
     }
     throw e;
   }
+}
+
+// Beim Öffnen prüfen, ob die Anmeldung noch gilt; sonst sofort zu Microsoft weiterleiten
+export async function anmeldungPruefen() {
+  await token();
 }
 
 export class GraphError extends Error {
@@ -224,6 +231,11 @@ export async function replaceContent(driveId, itemId, blob) {
     headers: { "Content-Type": blob.type || "application/octet-stream" },
     body: blob,
   });
+}
+
+// Datei löschen (landet im OneDrive-Papierkorb)
+export async function deleteItem(driveId, itemId) {
+  await g(itemPath(driveId, itemId), { method: "DELETE" });
 }
 
 export async function invite(driveId, itemId, email, nachricht) {
