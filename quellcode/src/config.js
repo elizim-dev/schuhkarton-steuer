@@ -1,5 +1,5 @@
 // Feste Konfiguration der App „Schuhkarton Steuer“
-export const VERSION = "1.4.0";
+export const VERSION = "1.5.0";
 
 export const CLIENT_ID = "e15c462d-09ab-471a-bda0-7b7b06581e86";
 export const REGISTERED_REDIRECT = "https://elizim-dev.github.io/schuhkarton-steuer/";

@@ -68,7 +68,9 @@ export function gesellschafterUebersicht(journal, config, jahr) {
         (e) => (e.art === "ausgabe" && e.bezahltVon === g.name && (e.behandlung === "einlage" || e.behandlung === "erstattung")) ||
           (e.art === "einlage" && e.gesellschafterin === g.name),
       );
-      const entnahmen = s((e) => e.art === "entnahme" && e.gesellschafterin === g.name);
+      // Entnahmen; eine aufgeteilte Privatentnahme zählt je Person mit ihrem Teil
+      const teil = (e) => (e.aufteilung ? (e.aufteilung.find((x) => x.name === g.name) || { cent: 0 }).cent : e.betragCent);
+      const entnahmen = liste.filter((e) => e.art === "entnahme" && (e.aufteilung ? e.aufteilung.some((x) => x.name === g.name) : e.gesellschafterin === g.name)).reduce((a, e) => a + teil(e), 0);
       const gewinnAusz = s((e) => e.art === "entnahme" && e.entnahmeArt === "gewinn" && e.gesellschafterin === g.name);
       // Sonderbetriebsausgaben: privat getragene Kosten (nach Zahlung) + km-Pauschale aus Fahrten (im Jahr der Fahrt)
       const sbaFahrten = fahrtenJahr(journal, j).filter((e) => e.fahrt.fahrerin === g.name).reduce((a, e) => a + (e.fahrt.sbaCent || 0), 0);

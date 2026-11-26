@@ -299,6 +299,7 @@ function render() {
           ${S.betriebe.map((x) => `<button data-act="betrieb" data-key="${esc(x.key)}" class="${x.key === S.active ? "on" : ""}">${esc(x.name)}</button>`).join("")}
         </div>` : ""}
     </header>
+    <div id="update-hinweis" class="update-hinweis" ${neueVersion ? "" : "hidden"}><span>Neue Version ${esc(neueVersion || "")} verfügbar.</span> <button class="primary" data-act="neu-laden">Jetzt laden</button></div>
     <main id="main"></main>
     <nav class="tabs">
       ${[["erfassen", "＋", "Erfassen"], ["journal", "☰", "Journal"], ["auswertung", "▤", "Auswertung"], ["einstellungen", "⚙︎", "Einstellungen"]]
@@ -422,12 +423,18 @@ function formular(v, { neu, ohne, unsicher = [] }) {
       <label data-show="pauschaleMenge">Anzahl (km bzw. Tage)<input name="pauschaleMenge" inputmode="decimal" value="${esc(v.pauschaleMenge || "")}"></label>
     </div>
     <label data-show="partner" class="${u("partner")}"><span data-lbl="partner">Lieferant</span><input name="partner" value="${esc(v.partner || "")}"></label>
-    <label data-show="gesellschafterin">Gesellschafterin<select name="gesellschafterin">${ges.map((n) => opt(n, n, v.gesellschafterin)).join("")}</select></label>
+    <label data-show="gesellschafterin">Gesellschafterin<select name="gesellschafterin">${ges.map((n) => opt(n, n, v.gesellschafterin)).join("")}${ges.length > 1 ? opt("__alle", "Aufteilen auf alle Gesellschafterinnen", v.aufteilung ? "__alle" : "") : ""}</select></label>
+    <div data-show="aufteilung" class="aufteilung">
+      ${ges.map((n, i) => `<label>${esc(vorname(n))} (€)<input name="auf${i}" inputmode="decimal" value="${v.aufteilung && v.aufteilung.at(i) ? betragText(v.aufteilung.at(i).cent) : ""}"></label>`).join("")}
+      <p class="klein" data-lbl="aufteilung"></p>
+    </div>
     <label data-show="entnahmeArt">Art der Entnahme<select name="entnahmeArt">
       ${opt("erstattung", "Erstattung vorgestreckter Ausgaben", v.entnahmeArt)}${opt("privat", "Privatentnahme", v.entnahmeArt)}${opt("gewinn", "Gewinnauszahlung", v.entnahmeArt)}
     </select></label>
     <label data-show="kategorie" class="${u("kategorie")}">Kategorie<select name="kategorie"></select></label>
     <label>Beschreibung<input name="beschreibung" value="${esc(v.beschreibung || "")}" placeholder="z. B. Jahresabo Zoom"></label>
+    <p data-show="bewHinweis" class="hinweis neutral klein">Gebucht wird der volle Rechnungsbetrag. Die steuerlichen 70 % rechnet die App selbst.</p>
+    <p data-show="bewNurGes" class="hinweis gruen klein">Nur Gesellschafterinnen dabei? Dann ist es keine Bewirtung, sondern privat. <button type="button" class="link" data-act="als-entnahme">Als private Entnahme aufteilen</button></p>
     <fieldset data-show="bewirtung" class="bewirtung">
       <legend>Angaben zur Bewirtung (Pflicht)</legend>
       <label>Anlass<input name="bewAnlass" value="${esc(v.bewAnlass || "")}" placeholder="z. B. Projektbesprechung Kooperation"></label>
@@ -454,6 +461,23 @@ function formular(v, { neu, ohne, unsicher = [] }) {
   </form>`;
 }
 
+// Aufteilung einer Privatentnahme: Felder je Gesellschafterin, vorbelegt nach Anteilen, Summe prüfen
+function aufteilungAnzeigen(form, cfg) {
+  const ges = (cfg.gesellschafter || []).filter((g) => g.name);
+  const total = parseBetrag(form.betrag.value);
+  const felder = ges.map((_, i) => form.elements[`auf${i}`]);
+  const leer = felder.every((f) => !f.value);
+  const neuerBetrag = form.dataset.aufTotal !== String(total) && felder.every((f) => !f.value || f.dataset.auto === "1");
+  form.dataset.aufTotal = String(total);
+  if (total > 0 && (leer || neuerBetrag)) {
+    aufteilen(total, ges).forEach((c, i) => { felder.at(i).value = betragText(c); felder.at(i).dataset.auto = "1"; });
+  }
+  const summe = felder.reduce((a, f) => a + (parseBetrag(f.value) || 0), 0);
+  form.querySelector('[data-lbl="aufteilung"]').textContent = total > 0
+    ? (summe === total ? "Summe stimmt." : `Summe ${euro(summe)} – Rechnung ${euro(total)}: Differenz ${euro(total - summe)}.`)
+    : "Erst den Gesamtbetrag eintragen.";
+}
+
 function bindFormular(form, v) {
   const cfg = aktivData().config;
   const gbr = cfg.typ === "gbr";
@@ -464,6 +488,12 @@ function bindFormular(form, v) {
   const update = () => {
     const art = form.art.value;
     const handel = art === "ausgabe" || art === "einnahme";
+    // Kategorien zuerst füllen, damit die Anzeige (z. B. Bewirtung) schon beim Öffnen stimmt
+    if (art !== letzteArt && handel) {
+      const liste = art === "einnahme" ? KATEGORIEN_EINNAHME : KATEGORIEN_AUSGABE;
+      const sel = liste.includes(v.kategorie) ? v.kategorie : katSel.value;
+      katSel.innerHTML = `<option value="">– bitte wählen –</option>` + liste.map((k) => opt(k, k, sel)).join("");
+    }
     const show = {
       partner: handel,
       kategorie: handel,
@@ -471,18 +501,23 @@ function bindFormular(form, v) {
       status: handel,
       zahlungsdatum: handel && form.status.value === "bezahlt",
       gesellschafterin: art === "einlage" || art === "entnahme",
+      aufteilung: art === "entnahme" && form.gesellschafterin.value === "__alle",
       entnahmeArt: art === "entnahme",
+      bewNurGes: gbr && !ohne && art === "ausgabe" && form.kategorie.value === "Bewirtung" && (cfg.gesellschafter || []).filter((g) => g.name).length > 1,
       bezahltVon: gbr && art === "ausgabe",
       behandlung: gbr && art === "ausgabe" && form.bezahltVon.value !== "betrieb",
       eigenbeleg: ohne,
       pauschale: ohne && art === "ausgabe",
       pauschaleMenge: ohne && art === "ausgabe" && form.pauschaleTyp.value !== "",
-      anteil: art === "ausgabe" && !form.pauschaleTyp.value,
+      anteil: art === "ausgabe" && !form.pauschaleTyp.value && form.kategorie.value !== "Bewirtung",
+      bewHinweis: art === "ausgabe" && form.kategorie.value === "Bewirtung",
       bewirtung: art === "ausgabe" && form.kategorie.value === "Bewirtung",
       hoHinweis: gbr && art === "ausgabe" && (form.pauschaleTyp.value === "ho" || form.kategorie.value === "Homeoffice-Pauschale") &&
         !(form.bezahltVon.value !== "betrieb" && form.behandlung.value === "sonderbetriebsausgabe"),
     };
     form.querySelectorAll("[data-show]").forEach((el) => (el.style.display = show[el.dataset.show] ? "" : "none"));
+    if (!show.anteil && art === "ausgabe" && form.kategorie.value === "Bewirtung") form.anteil.value = "100";
+    if (show.aufteilung) aufteilungAnzeigen(form, cfg);
     const lbl = form.querySelector('[data-lbl="partner"]');
     if (lbl) lbl.textContent = art === "einnahme" ? "Kunde / Zahlende:r" : "Lieferant / Empfänger:in";
     const anteilP = parseFloat(String(form.anteil.value).replace(",", "."));
@@ -490,11 +525,6 @@ function bindFormular(form, v) {
     form.querySelector('[data-lbl="betrag"]').textContent = teil ? "Rechnungsbetrag (€)" : "Betrag (€)";
     const gesamt = parseBetrag(form.betrag.value);
     form.querySelector('[data-lbl="anteil"]').textContent = teil && gesamt > 0 ? `Gebucht wird: ${euro(Math.round((gesamt * anteilP) / 100))} (${String(anteilP).replace(".", ",")} % von ${euro(gesamt)})` : "100 % = ganze Rechnung ist betrieblich";
-    if (art !== letzteArt && handel) {
-      const liste = art === "einnahme" ? KATEGORIEN_EINNAHME : KATEGORIEN_AUSGABE;
-      const sel = liste.includes(v.kategorie) ? v.kategorie : katSel.value;
-      katSel.innerHTML = `<option value="">– bitte wählen –</option>` + liste.map((k) => opt(k, k, sel)).join("");
-    }
     letzteArt = art;
   };
   const pauschale = (geaendertFeld) => {
@@ -532,6 +562,17 @@ function bindFormular(form, v) {
     update();
   });
   form.partner.addEventListener("input", () => (form.dataset.partnerAuto = ""));
+  form.querySelectorAll('[name^="auf"]').forEach((f) => f.addEventListener("input", () => { f.dataset.auto = ""; aufteilungAnzeigen(form, cfg); }));
+  form.betrag.addEventListener("input", () => { if (form.gesellschafterin.value === "__alle") aufteilungAnzeigen(form, cfg); });
+  const umstellen = form.querySelector('[data-act="als-entnahme"]');
+  if (umstellen) umstellen.addEventListener("click", (ev) => {
+    ev.preventDefault(); ev.stopPropagation();
+    form.art.value = "entnahme";
+    form.entnahmeArt.value = "privat";
+    form.gesellschafterin.value = "__alle";
+    if (!form.beschreibung.value.trim() && form.partner.value.trim()) form.beschreibung.value = `Essen ${form.partner.value.trim()}, privat`;
+    update();
+  });
   form.pauschaleMenge.addEventListener("input", () => pauschale("pauschaleMenge"));
   form.betrag.addEventListener("input", update);
   form.anteil.addEventListener("input", update);
@@ -555,6 +596,15 @@ function leseFormular(form) {
   if (mitPauschale && !f.partner.trim()) f.partner = pauschalePartner(f.pauschaleTyp, aktivData().config, f.bezahltVon);
   if (handel && !f.partner.trim()) throw new Error(art === "einnahme" ? "Bitte Kunde/Zahlende:n angeben." : "Bitte Lieferant/Empfänger:in angeben.");
   if (!handel && !f.gesellschafterin) throw new Error("Bitte in den Betriebsdaten Gesellschafterinnen eintragen.");
+  let aufteilung = null;
+  if (art === "entnahme" && f.gesellschafterin === "__alle") {
+    if (f.entnahmeArt === "erstattung") throw new Error("Eine Erstattung geht an eine Person – bitte die Gesellschafterin wählen.");
+    const ges = (aktivData().config.gesellschafter || []).filter((g) => g.name);
+    aufteilung = ges.map((g, i) => ({ name: g.name, cent: parseBetrag(f[`auf${i}`]) || 0 }));
+    const summe = aufteilung.reduce((a, x) => a + x.cent, 0);
+    if (aufteilung.some((x) => x.cent < 0)) throw new Error("Ein Anteil ist negativ.");
+    if (summe !== parseBetrag(f.betrag)) throw new Error(`Die Aufteilung (${euro(summe)}) ergibt nicht den Gesamtbetrag (${euro(parseBetrag(f.betrag))}).`);
+  }
   const status = handel ? f.status : "bezahlt";
   const gbrAusgabe = istGbR() && art === "ausgabe";
   const bezahltVon = gbrAusgabe ? f.bezahltVon : null;
@@ -574,7 +624,8 @@ function leseFormular(form) {
     zahlungsdatum: status === "bezahlt" ? (handel ? f.zahlungsdatum || f.belegdatum : f.belegdatum) : null,
     bezahltVon,
     behandlung: bezahltVon && bezahltVon !== "betrieb" ? f.behandlung : null,
-    gesellschafterin: handel ? "" : f.gesellschafterin,
+    gesellschafterin: handel ? "" : aufteilung ? aufteilung.map((x) => x.name).join(" / ") : f.gesellschafterin,
+    aufteilung,
     entnahmeArt: art === "entnahme" ? f.entnahmeArt : null,
     eigenbelegGrund: f.ohne === "1" ? f.eigenbelegGrund : null,
     pauschale,
@@ -998,7 +1049,8 @@ function renderJournal(main) {
     <section class="card">
       <div class="kopf">
         <h2>Journal ${esc(cfg.name)}</h2>
-        <select data-act="jahr">${jahre.map((j) => opt(j, j, S.jahr)).join("")}</select>
+        <div class="kopf-rechts"><button class="sekundaer klein-btn" data-act="aktualisieren" title="Daten aus OneDrive neu laden">↻ Aktualisieren</button>
+        <select data-act="jahr">${jahre.map((j) => opt(j, j, S.jahr)).join("")}</select></div>
       </div>
       ${offen.length ? `<p class="hinweis gruen">${offen.length} offene${offen.length === 1 ? "r Posten" : " Posten"} (${euro(sum(offen))}) – zählt erst bei Zahlung.</p>` : ""}
       ${gbr ? "" : `<div class="summen">
@@ -1182,18 +1234,22 @@ function zeile(e) {
   const minus = e.art === "ausgabe" || e.art === "entnahme";
   const titel = e.fahrt
     ? `Fahrt ${e.fahrt.start} – ${e.fahrt.ziel}`
-    : e.partner || (e.art === "einlage" ? `Einlage ${e.gesellschafterin}` : `${e.entnahmeArt === "gewinn" ? "Gewinnauszahlung" : "Entnahme"} ${e.gesellschafterin}`);
+    : e.partner || (e.art === "einlage" ? `Einlage ${e.gesellschafterin}`
+      : e.aufteilung ? `Privatentnahme ${e.aufteilung.map((x) => vorname(x.name)).join(" / ")}`
+      : `${e.entnahmeArt === "gewinn" ? "Gewinnauszahlung" : "Entnahme"} ${e.gesellschafterin}`);
   const badges = [];
   if (e.storniert) badges.push(`<i class="b rot">storniert</i>`);
   if (e.status === "offen") badges.push(`<i class="b">${e.fahrt ? "Erstattung offen" : "offen"}</i>`);
   if (e.eigenbeleg && !e.fahrt) badges.push(`<i class="b">Eigenbeleg</i>`);
-  if (e.anteilProzent) badges.push(`<i class="b">${esc(String(e.anteilProzent).replace(".", ","))} %</i>`);
+  if (e.anteilProzent && !(e.gesamtCent && e.gesamtCent !== e.betragCent)) badges.push(`<i class="b">${esc(String(e.anteilProzent).replace(".", ","))} %</i>`);
   const pb = (txt, name) => badges.push(`<i class="b ${personKlasse(name)}">${esc(txt)} ${esc(name)}</i>`);
   if (e.behandlung === "einlage") pb("Einlage", e.bezahltVon);
   if (e.behandlung === "erstattung") pb("vorgestreckt", e.bezahltVon);
   if (e.behandlung === "sonderbetriebsausgabe") pb("SBA", e.bezahltVon);
   if (e.art === "einlage") pb("Einlage", e.gesellschafterin);
-  if (e.art === "entnahme") pb({ erstattung: "Erstattung", gewinn: "Gewinnauszahlung" }[e.entnahmeArt] || "Entnahme", e.gesellschafterin);
+  if (e.art === "entnahme" && e.aufteilung) e.aufteilung.forEach((x) => badges.push(`<i class="b ${personKlasse(x.name)}">${esc(vorname(x.name))} ${euro(x.cent)}</i>`));
+  else if (e.art === "entnahme") pb({ erstattung: "Erstattung", gewinn: "Gewinnauszahlung" }[e.entnahmeArt] || "Entnahme", e.gesellschafterin);
+  if (e.gesamtCent && e.anteilProzent && e.gesamtCent !== e.betragCent) badges.push(`<i class="b">Rechnung ${euro(e.gesamtCent)} · ${esc(String(e.anteilProzent).replace(".", ","))} %</i>`);
   if (e.fahrt) pb(`Fahrt ${String(e.fahrt.kmGesamt).replace(".", ",")} km`, e.fahrt.fahrerin);
   return `<li data-act="detail" data-id="${esc(e.id)}" class="${e.storniert ? "storno" : ""}">
     <div class="l1"><span>${esc(titel)}</span><b><i class="punkt ${minus ? "aus" : "ein"}"></i>${minus ? "−" : "+"}${euro(e.betragCent)}</b></div>
@@ -1224,7 +1280,7 @@ function zeigeDetail(id) {
       ${reihe("Belegdatum", datumDE(e.belegdatum))}
       ${reihe("Status", e.status === "bezahlt" ? `bezahlt am ${datumDE(e.zahlungsdatum)}` : "offen")}
       ${reihe(e.art === "einnahme" ? "Kunde" : "Lieferant", esc(e.partner))}
-      ${reihe("Gesellschafterin", esc(e.gesellschafterin))}
+      ${e.aufteilung ? reihe("Aufteilung", e.aufteilung.map((x) => `${esc(x.name)}: ${euro(x.cent)}`).join("<br>")) : reihe("Gesellschafterin", esc(e.gesellschafterin))}
       ${reihe("Kategorie", esc(e.kategorie))}
       ${reihe("Beschreibung", esc(e.beschreibung))}
       ${e.bewAnlass ? reihe("Bewirtung", `Anlass: ${esc(e.bewAnlass)}<br>Teilnehmende: ${esc(e.bewTeilnehmende)}<br>Ort: ${esc(e.bewOrt)}`) : ""}
@@ -2111,6 +2167,8 @@ document.addEventListener("click", async (ev) => {
       case "fahrten-abrechnen": zeigeFahrtenAbrechnen(el.dataset.name); break;
       case "fahrtenliste": zeigeFahrtenliste(); break;
       case "loeschen": loesche(el.dataset.id); break;
+      case "aktualisieren": aktualisieren(); break;
+      case "neu-laden": location.reload(); break;
       case "loeschprotokoll": zeigeLoeschprotokoll(); break;
       case "gewinn-auszahlen": zeigeGewinnAuszahlen(); break;
       case "verwerfen":
@@ -2198,6 +2256,37 @@ document.addEventListener("click", async (ev) => {
   } catch (e) { fehler(e); }
 });
 
+// Daten frisch aus OneDrive laden (z. B. nach Buchungen anderer Personen)
+async function aktualisieren() {
+  const b = aktiv();
+  if (!b) return;
+  busy("Aktualisiere …");
+  try {
+    for (const x of S.betriebe) { try { await ladeBetrieb(x, true); } catch (e) { if (x === b) throw e; } }
+    busy(null);
+    toast("Aktualisiert");
+    render();
+    pruefeVersion();
+  } catch (err) { fehler(err); }
+}
+
+// Neue App-Version auf GitHub? → Hinweis mit Knopf zum Neuladen
+let neueVersion = null;
+async function pruefeVersion() {
+  try {
+    const res = await fetch(`version.json?t=${Date.now()}`, { cache: "no-store" });
+    if (!res.ok) return;
+    const { version } = await res.json();
+    if (version && version !== VERSION && neueVersion !== version) {
+      neueVersion = version;
+      const el = document.getElementById("update-hinweis");
+      if (el) { el.hidden = false; el.querySelector("span").textContent = `Neue Version ${version} verfügbar.`; }
+    }
+  } catch (_) { /* offline o. Ä.: still bleiben */ }
+}
+setInterval(pruefeVersion, 10 * 60 * 1000);
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") pruefeVersion(); });
+
 // Schutzregel (Content Security Policy): blockierte Adressen sichtbar machen, damit fehlende
 // Microsoft-Adressen schnell auffallen
 const blockiert = new Set();
@@ -2242,6 +2331,7 @@ document.addEventListener("securitypolicyviolation", (ev) => {
     if (!aktiv()) S.view = "einstellungen";
   }
   render();
+  pruefeVersion();
   if (S.account && ls.get("sk_einladung", null)) await einladungAnnehmen();
   else if (S.account) pruefeFaelligBeimOeffnen();
 })();

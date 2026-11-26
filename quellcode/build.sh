@@ -9,5 +9,6 @@ cp public/style.css public/manifest.webmanifest dist/
 sed "s/__VERSION__/$VERSION/g" public/index.html > dist/index.html
 python3 tools/icons.py dist/icons >/dev/null
 touch dist/.nojekyll
+printf '{"version":"%s"}\n' "$VERSION" > dist/version.json
 echo "Gebaut: Version $VERSION"
 ls -la dist dist/icons
