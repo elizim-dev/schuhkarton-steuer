@@ -1,7 +1,9 @@
 // Hilfsfunktionen: Formatierung, Bilder/PDF, Eigenbeleg, Excel, KI
 import { jsPDF } from "jspdf";
 import * as XLSX from "xlsx";
-import { KATEGORIEN_AUSGABE, KATEGORIEN_EINNAHME } from "./config.js";
+import { KATEGORIEN_AUSGABE as ALLE_AUSGABEN, KATEGORIEN_EINNAHME, NUR_REISE_KATEGORIEN } from "./config.js";
+// Für die KI: keine Kategorien, die nur über „Reise“ gebucht werden
+const KATEGORIEN_AUSGABE = ALLE_AUSGABEN.filter((k) => !NUR_REISE_KATEGORIEN.includes(k));
 
 export const esc = (s) =>
   String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
@@ -39,8 +41,11 @@ export function dateiname(e, kurz) {
       .replace(/\s+/g, "-")
       .replace(/-+/g, "-")
       .slice(0, 40) || "ohne-Name";
+  const rb = e.reise && e.reise.baustein;
   const partner = e.fahrt
     ? "Fahrt-" + e.fahrt.fahrerin
+    : rb === "pkw" ? "Fahrt-" + e.reise.person
+    : rb === "verpflegung" ? "Verpflegung-" + e.reise.person
     : e.art === "einlage" || e.art === "entnahme" ? (e.art === "einlage" ? "Einlage-" : e.entnahmeArt === "gewinn" ? "Gewinnauszahlung-" : "Entnahme-") + e.gesellschafterin : e.partner;
   const prefix = e.eigenbeleg ? "Eigenbeleg_" : "";
   return `${e.belegdatum}_${clean(kurz)}_${prefix}${clean(partner)}_${betragText(e.betragCent)}.pdf`;
@@ -112,6 +117,54 @@ export function eigenbelegPdf(e, betrieb, ersteller) {
     y += 7 * lines.length;
   };
   const artText = { ausgabe: "Ausgabe", einnahme: "Einnahme", einlage: "Einlage", entnahme: "Entnahme" }[e.art];
+  const r = e.reise;
+  const zeitText = (d, z) => `${datumDE(d)}${z ? `, ${z} Uhr` : ""}`;
+  const reiseZeilen = () => {
+    if (!r) return;
+    zeile("Reise:", `${r.ziel} – ${r.anlass}`);
+    zeile("Abfahrt:", zeitText(r.abDatum, r.abZeit));
+    zeile("Rückkehr:", zeitText(r.anDatum, r.anZeit));
+  };
+  const fuss = () => {
+    zeile("Grund Eigenbeleg:", e.eigenbelegGrund);
+    y += 6;
+    zeile("Erstellt von:", ersteller);
+    zeile("Erstellt am:", datumDE(heute()));
+    y += 20;
+    pdf.line(20, y, 100, y);
+    pdf.setFontSize(8);
+    pdf.text("Unterschrift", 20, y + 5);
+    pdf.text("Erstellt mit Schuhkarton Steuer", 20, 287);
+    return pdf.output("blob");
+  };
+  if (r && r.baustein === "verpflegung" && r.verpflegung) {
+    const gbr = e.behandlung === "sonderbetriebsausgabe";
+    zeile("Betrieb:", betrieb.name);
+    zeile("Art:", `Verpflegungsmehraufwand (Pauschalen Inland)${gbr ? " – Sonderbetriebsausgabe" : ""}`);
+    zeile("Reisende Person:", r.person);
+    reiseZeilen();
+    y += 3;
+    const TYP = { eintaegig: "eintägig", anreise: "Anreisetag", abreise: "Abreisetag", zwischen: "voller Tag" };
+    pdf.setFont(undefined, "bold");
+    pdf.text("Tag", 20, y); pdf.text("Pauschale", 70, y); pdf.text("Gestellt", 100, y); pdf.text("Kürzung", 140, y); pdf.text("Betrag", 170, y);
+    pdf.setFont(undefined, "normal");
+    y += 6;
+    for (const t of r.verpflegung.tage) {
+      const g = [t.mahlzeiten.f && "Frühstück", t.mahlzeiten.m && "Mittag", t.mahlzeiten.a && "Abend"].filter(Boolean).join(", ") || "–";
+      pdf.text(`${datumDE(t.datum)} (${TYP[t.typ] || t.typ}${t.typ === "eintaegig" ? `, ${String(t.stunden).replace(".", ",")} Std.` : ""})`, 20, y);
+      pdf.text(euro(t.pauschale), 70, y);
+      pdf.text(pdf.splitTextToSize(g, 38), 100, y);
+      pdf.text(t.kuerzung ? "- " + euro(t.kuerzung) : "–", 140, y);
+      pdf.text(euro(t.betrag), 170, y);
+      y += g.length > 22 ? 10 : 6;
+    }
+    pdf.setFont(undefined, "bold");
+    pdf.text("Summe", 20, y); pdf.text(euro(e.betragCent), 170, y);
+    pdf.setFont(undefined, "normal");
+    y += 9;
+    zeile("Grundlage:", "§ 4 Abs. 5 Nr. 5 i. V. m. § 9 Abs. 4a EStG: 14 € bei mehr als 8 Std. sowie An- und Abreisetag, 28 € je voller Tag; Kürzung je gestellter Mahlzeit 5,60 € (Frühstück) bzw. 11,20 € (Mittag-/Abendessen)");
+    return fuss();
+  }
   if (e.fahrt) {
     const f = e.fahrt;
     const satz = (c) => (c / 100).toLocaleString("de-DE", { minimumFractionDigits: 2 }) + " €";
@@ -122,6 +175,7 @@ export function eigenbelegPdf(e, betrieb, ersteller) {
     zeile("Mitfahrerin:", f.mitfahrerin || "keine");
     zeile("Strecke:", `${f.start} – ${f.ziel}${f.hinUndZurueck ? " und zurück" : ""}`);
     zeile("Anlass:", f.anlass);
+    if (r && r.abZeit) { zeile("Abfahrt:", zeitText(r.abDatum, r.abZeit)); zeile("Rückkehr:", zeitText(r.anDatum, r.anZeit)); }
     zeile("Gefahrene km:", f.hinUndZurueck ? `2 × ${f.km} km = ${f.kmGesamt} km` : `${f.kmGesamt} km`);
     y += 3;
     zeile("Erstattung GbR:", `${f.kmGesamt} km × ${satz(f.satzCent)} = ${euro(e.betragCent)}`);
@@ -148,6 +202,7 @@ export function eigenbelegPdf(e, betrieb, ersteller) {
   else zeile(e.art === "einnahme" ? "Zahlende/r:" : "Empfänger/in:", e.partner);
   if (e.kategorie) zeile("Kategorie:", e.kategorie);
   zeile("Zweck / Anlass:", e.beschreibung);
+  if (r) { zeile("Reisende Person:", r.person); reiseZeilen(); if (r.pkw) zeile("Strecke:", `${r.pkw.start} – ${r.ziel}${r.pkw.hinUndZurueck ? " und zurück" : ""}, ${String(r.pkw.kmGesamt).replace(".", ",")} km`); }
   if (e.anteilProzent) zeile("Betrieblicher Anteil:", `${String(e.anteilProzent).replace(".", ",")} % von ${euro(e.gesamtCent)}`);
   if (e.bewAnlass) { zeile("Bewirtung Anlass:", e.bewAnlass); zeile("Teilnehmende:", e.bewTeilnehmende); zeile("Ort:", e.bewOrt); }
   zeile("Grund Eigenbeleg:", e.eigenbelegGrund);
@@ -194,12 +249,13 @@ export function journalExcel(journal, config) {
         "Bewirtung (Anlass / Teilnehmende / Ort)": e.bewAnlass ? `${e.bewAnlass} / ${e.bewTeilnehmende} / ${e.bewOrt}` : "",
         "Erfasst von": e.erfasstVon || "",
         Datei: e.datei ? e.datei.name : "",
+        Reise: e.reise ? `${e.reise.ziel} · ${e.reise.anlass} · ${e.reise.abDatum}${e.reise.anDatum && e.reise.anDatum !== e.reise.abDatum ? " bis " + e.reise.anDatum : ""} · ${e.reise.person}` : "",
         Fahrt: e.fahrt
           ? `${e.fahrt.fahrerin}${e.fahrt.mitfahrerin ? " mit " + e.fahrt.mitfahrerin : ""} · ${e.fahrt.start} – ${e.fahrt.ziel}${e.fahrt.hinUndZurueck ? " und zurück" : ""} · ${e.fahrt.kmGesamt} km · SBA ${(e.fahrt.sbaCent / 100).toFixed(2).replace(".", ",")} €`
           : "",
       }));
     const ws = XLSX.utils.json_to_sheet(rows);
-    ws["!cols"] = [10, 11, 13, 10, 11, 28, 24, 32, 14, 10, 14, 20, 10, 8, 14, 36, 16, 40, 60].map((w) => ({ wch: w }));
+    ws["!cols"] = [10, 11, 13, 10, 11, 28, 24, 32, 14, 10, 14, 20, 10, 8, 14, 36, 16, 40, 40, 60].map((w) => ({ wch: w }));
     rows.forEach((r, i) => {
       const e = journal.eintraege.find((x) => x.belegnr === r["Beleg-Nr."]);
       const cell = ws[XLSX.utils.encode_cell({ r: i + 1, c: 17 })];

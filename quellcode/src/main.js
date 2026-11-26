@@ -4,8 +4,9 @@ import {
   KATEGORIEN_AUSGABE, KATEGORIEN_EINNAHME, EIGENBELEG_GRUENDE,
   KM_PAUSCHALE_CENT, HOMEOFFICE_TAG_CENT, HOMEOFFICE_MAX_CENT,
   GWG_GRENZE_BRUTTO_CENT, KU_GRENZE_VORJAHR_CENT, KU_GRENZE_LAUFEND_CENT, VORLAGEN_FILE, FAHRT_ERSTATTUNG_STANDARD_CENT, LOESCHPROTOKOLL_FILE,
+  NUR_REISE_KATEGORIEN,
 } from "./config.js";
-import { aufteilen, migriereKategorien, euer, ergebnis, gesellschafterUebersicht, faelligePerioden, zahlJahr, fahrtenUebersicht } from "./euer.js";
+import { aufteilen, migriereKategorien, euer, ergebnis, gesellschafterUebersicht, faelligePerioden, zahlJahr, fahrtenUebersicht, verpflegungTage } from "./euer.js";
 import * as G from "./graph.js";
 import {
   esc, safeUrl, heute, uuid, euro, betragText, parseBetrag, datumDE, dateiname,
@@ -27,7 +28,7 @@ const S = {
   active: ls.get("sk_active", null),
   data: {},            // key -> { config, journal, etag }
   jahr: String(new Date().getFullYear()),
-  filter: { monat: "", kat: "", q: "", storno: false },
+  filter: { monat: "", art: "", q: "", storno: false },
   draft: null,
   queue: [],
   browser: null,
@@ -345,19 +346,19 @@ function renderErfassen(main) {
           <button data-act="foto"><b>📷</b>Beleg fotografieren</button>
           <button data-act="datei"><b>📄</b>PDF oder Bild wählen</button>
           <button data-act="ohne"><b>✍️</b>Ohne Beleg<small>Eigenbeleg, Pauschale${istGbR() ? ", Einlage/Entnahme" : ""}</small></button>
-          ${istGbR() ? `<button data-act="fahrt"><b>🚗</b>Fahrt<small>mit eigenem Pkw: Erstattung + Sonderbetriebsausgabe</small></button>` : ""}
+          <button data-act="reise"><b>🧳</b>Reise<small>Pkw, Ticket, Hotel, Verpflegung</small></button>
         </div>
         ${S.queue.length ? `<p class="hinweis">Noch ${S.queue.length} Datei(en) in der Warteschlange.</p>` : ""}
       </section>`;
     return;
   }
-  if (d.mode === "fahrt") {
+  if (d.mode === "reise") {
     main.innerHTML = `
       <section class="card">
-        <div class="kopf"><h2>Fahrt erfassen</h2><button class="link" data-act="verwerfen">Verwerfen</button></div>
-        ${formularFahrt(d.values || {}, { neu: true })}
+        <div class="kopf"><h2>${d.edit ? "Reise bearbeiten" : "Reise erfassen"}</h2><button class="link" data-act="verwerfen">Verwerfen</button></div>
+        ${formularReise(d)}
       </section>`;
-    bindFahrt(main.querySelector("form"));
+    bindReise(main.querySelector("form"), d);
     return;
   }
   const ki = d.ki || {};
@@ -490,7 +491,7 @@ function bindFormular(form, v) {
     const handel = art === "ausgabe" || art === "einnahme";
     // Kategorien zuerst füllen, damit die Anzeige (z. B. Bewirtung) schon beim Öffnen stimmt
     if (art !== letzteArt && handel) {
-      const liste = art === "einnahme" ? KATEGORIEN_EINNAHME : KATEGORIEN_AUSGABE;
+      const liste = art === "einnahme" ? KATEGORIEN_EINNAHME : KATEGORIEN_AUSGABE.filter((k) => !NUR_REISE_KATEGORIEN.includes(k) || k === v.kategorie);
       const sel = liste.includes(v.kategorie) ? v.kategorie : katSel.value;
       katSel.innerHTML = `<option value="">– bitte wählen –</option>` + liste.map((k) => opt(k, k, sel)).join("");
     }
@@ -592,6 +593,7 @@ function leseFormular(form) {
   const bewirtung = art === "ausgabe" && f.kategorie === "Bewirtung";
   if (bewirtung && (!f.bewAnlass.trim() || !f.bewTeilnehmende.trim() || !f.bewOrt.trim())) throw new Error("Bitte bei Bewirtungen Anlass, Teilnehmende und Ort angeben – das verlangt das Finanzamt.");
   if (handel && !f.kategorie) throw new Error("Bitte eine Kategorie wählen.");
+  if (NUR_REISE_KATEGORIEN.includes(f.kategorie) && !(form.dataset.editId && (aktivData().journal.eintraege.find((x) => x.id === form.dataset.editId) || {}).reise)) throw new Error("Verpflegungsmehraufwand bitte über „Erfassen → Reise“ buchen. Restaurantbelege auf Reisen sind nicht absetzbar – dafür gibt es die Pauschale.");
   const mitPauschale = art === "ausgabe" && f.ohne === "1" && !!f.pauschaleTyp;
   if (mitPauschale && !f.partner.trim()) f.partner = pauschalePartner(f.pauschaleTyp, aktivData().config, f.bezahltVon);
   if (handel && !f.partner.trim()) throw new Error(art === "einnahme" ? "Bitte Kunde/Zahlende:n angeben." : "Bitte Lieferant/Empfänger:in angeben.");
@@ -659,9 +661,9 @@ function neuerEntwurf(mode) {
 function sichereEntwurfsWerte() {
   const form = document.getElementById("f");
   if (!S.draft || !form) return;
+  if (S.draft.mode === "reise") return sichereReiseWerte();
   const f = Object.fromEntries(new FormData(form).entries());
   const v = { ...f };
-  if (form.fahrtForm) v.hinUndZurueck = form.hinUndZurueck.checked ? "on" : "";
   const c = parseBetrag(f.betrag);
   if (c > 0) v.betragCent = c;
   S.draft.values = { ...S.draft.values, ...v };
@@ -772,175 +774,535 @@ async function speichereNeu(form) {
 // ---------------------------------------------------------------------------
 const satzText = (c) => (c / 100).toLocaleString("de-DE", { minimumFractionDigits: 2 }) + " €";
 
-function formularFahrt(v, { neu }) {
+// ---------------------------------------------------------------------------
+// Reise (ab 1.6): ein Einstieg mit Bausteinen Pkw, Ticket, Hotel, Verpflegung.
+// Jeder Baustein wird eine eigene Buchung; alle tragen dieselbe reise.id und
+// erscheinen im Journal als eine Zeile.
+// ---------------------------------------------------------------------------
+const privatPerson = (cfg) => (cfg && cfg.inhaber) || (S.account && S.account.name) || ichBin();
+const BAUSTEIN_ICON = { pkw: "🚗", ticket: "🚆", hotel: "🏨", verpflegung: "🍽" };
+const reiseBaustein = (e) => (e.reise && e.reise.baustein) || (e.fahrt ? "pkw" : null);
+const istReise = (e) => !!(e.reise || e.fahrt);
+const kmText = (n) => String(n).replace(".", ",");
+const wochentag = (iso) => ["So", "Mo", "Di", "Mi", "Do", "Fr", "Sa"][new Date(iso + "T12:00:00Z").getUTCDay()];
+
+// Alle Buchungen einer Reise (zu einer Buchung)
+function reiseGruppe(e, journal = aktivData().journal) {
+  if (!e.reise) return [e];
+  return journal.eintraege.filter((x) => x.reise && x.reise.id === e.reise.id);
+}
+
+// Reisedaten aus einer Buchung (auch alte Fahrten ohne reise)
+function reiseBasis(e) {
+  if (e.reise) return e.reise;
+  const f = e.fahrt || {};
+  return { id: null, person: f.fahrerin, ziel: f.ziel, anlass: f.anlass, abDatum: e.belegdatum, abZeit: "", anDatum: e.belegdatum, anZeit: "" };
+}
+
+function neueReise() {
+  neuerEntwurf("reise");
+  S.draft.reiseId = uuid();
+  S.draft.belege = [];
+}
+
+// Bestehende Reise bearbeiten oder ergänzen (öffnet das Reise-Formular unter „Erfassen“)
+function reiseBearbeiten(id) {
+  const d = aktivData();
+  const e = d.journal.eintraege.find((x) => x.id === id);
+  if (!e) return;
+  const gruppe = reiseGruppe(e).filter((x) => !x.storniert);
+  const b = reiseBasis(e);
+  const pkw = gruppe.find((x) => reiseBaustein(x) === "pkw");
+  const verpfl = gruppe.find((x) => reiseBaustein(x) === "verpflegung");
+  const v = { person: b.person, ziel: b.ziel, anlass: b.anlass, abDatum: b.abDatum, abZeit: b.abZeit, anDatum: b.anDatum, anZeit: b.anZeit, mahl: {} };
+  if (pkw) {
+    const p = pkw.fahrt || (pkw.reise && pkw.reise.pkw) || {};
+    Object.assign(v, { mitPkw: "on", start: p.start, km: p.km, hinUndZurueck: p.hinUndZurueck ? "on" : "", mitfahrerin: p.mitfahrerin || "", status: pkw.status, zahlungsdatum: pkw.zahlungsdatum || "" });
+  }
+  if (verpfl && verpfl.reise.verpflegung) {
+    v.mitVerpfl = "on";
+    v.hotelFrueh = verpfl.reise.verpflegung.hotelFrueh ? "on" : "";
+    for (const t of verpfl.reise.verpflegung.tage) v.mahl[t.datum] = { ...t.mahlzeiten };
+  }
+  closeModal();
+  neuerEntwurf("reise");
+  Object.assign(S.draft, {
+    reiseId: (e.reise && e.reise.id) || uuid(),
+    belege: [],
+    values: v,
+    edit: { pkwId: pkw ? pkw.id : null, verpflId: verpfl ? verpfl.id : null, ids: gruppe.map((x) => x.id) },
+  });
+  S.view = "erfassen";
+  render();
+}
+
+function formularReise(d) {
   const cfg = aktivData().config;
+  const gbr = cfg.typ === "gbr";
   const ges = (cfg.gesellschafter || []).map((g) => g.name).filter(Boolean);
-  const f = v.fahrt || {};
-  const fahrerin = v.fahrerin || f.fahrerin || meinePerson(cfg);
-  const mit = v.mitfahrerin ?? f.mitfahrerin ?? "";
-  const hz = v.fahrt ? !!f.hinUndZurueck : v.hinUndZurueck === undefined ? true : !!v.hinUndZurueck;
+  const v = d.values || {};
+  const ed = d.edit || null;
+  const person = v.person || (gbr ? meinePerson(cfg) : privatPerson(cfg));
+  const hz = v.hinUndZurueck === undefined ? true : !!v.hinUndZurueck;
   const status = v.status || "offen";
+  const gebucht = ed ? aktivData().journal.eintraege.filter((x) => ed.ids.includes(x.id) && ["ticket", "hotel"].includes(reiseBaustein(x))) : [];
+  const bausteinCheck = (name, label, vorhanden) => vorhanden
+    ? `<label class="check baustein"><input type="checkbox" checked disabled> ${label} <small>(gebucht)</small></label><input type="hidden" name="${name}" value="on">`
+    : `<label class="check baustein"><input type="checkbox" name="${name}" ${v[name] ? "checked" : ""}> ${label}</label>`;
   return `
-  <form id="f" autocomplete="off">
-    <input type="hidden" name="fahrtForm" value="1">
-    <label>Datum der Fahrt<input type="date" name="belegdatum" value="${esc(v.belegdatum || heute())}" required></label>
+  <form id="f" autocomplete="off" data-reise="1">
+    ${gbr ? `<label>Reisende Person<select name="person">${ges.map((n) => opt(n, n, person)).join("")}</select></label>` : `<input type="hidden" name="person" value="${esc(person)}">`}
+    <label>Ziel<input name="ziel" value="${esc(v.ziel || "")}" placeholder="z. B. Rostock"></label>
+    <label>Betrieblicher Anlass<input name="anlass" value="${esc(v.anlass || "")}" placeholder="z. B. Workshop Uni Rostock"></label>
     <div class="zwei">
-      <label>Start<input name="start" value="${esc(v.start || f.start || "")}" placeholder="z. B. Rostock"></label>
-      <label>Ziel<input name="ziel" value="${esc(v.ziel || f.ziel || "")}" placeholder="z. B. Berlin"></label>
-    </div>
-    <label>Betrieblicher Anlass<input name="anlass" value="${esc(v.anlass || f.anlass || "")}" placeholder="z. B. Workshop bei Kunde X"></label>
-    <div class="zwei">
-      <label>km (einfache Strecke)<input name="km" inputmode="decimal" value="${esc(v.km || f.km || "")}"></label>
-      <label class="check unten"><input type="checkbox" name="hinUndZurueck" ${hz ? "checked" : ""}> Hin und zurück</label>
+      <label>Abfahrt<input type="date" name="abDatum" value="${esc(v.abDatum || heute())}" required></label>
+      <label>Uhrzeit<input type="time" name="abZeit" value="${esc(v.abZeit || "")}"></label>
     </div>
     <div class="zwei">
-      <label>Fahrerin<select name="fahrerin">${ges.map((n) => opt(n, n, fahrerin)).join("")}</select></label>
-      <label>Mitfahrerin<select name="mitfahrerin">${opt("", "niemand", mit)}${ges.map((n) => opt(n, n, mit)).join("")}</select></label>
+      <label>Rückkehr<input type="date" name="anDatum" value="${esc(v.anDatum || v.abDatum || heute())}"></label>
+      <label>Uhrzeit<input type="time" name="anZeit" value="${esc(v.anZeit || "")}"></label>
     </div>
-    <div class="zwei">
-      <label>Erstattung<select name="status">${opt("offen", "offen (Jahresende)", status)}${opt("bezahlt", "überwiesen", status)}</select></label>
-      <label data-show="zahlungsdatum">Überwiesen am<input type="date" name="zahlungsdatum" value="${esc(v.zahlungsdatum || heute())}"></label>
-    </div>
-    <div class="fahrt-rechnung" data-lbl="rechnung"></div>
-    <p class="klein">Die GbR erstattet ${satzText(fahrtSatz(cfg))} je km (Betriebsausgabe der GbR, Sonderbetriebseinnahme der Fahrerin). Die Fahrerin setzt ${satzText(KM_PAUSCHALE_CENT)} je km als Sonderbetriebsausgabe an. Die Erstattung bitte bis 31.12. überweisen.</p>
+    <p class="klein">Uhrzeiten braucht die App für die Verpflegungspauschale.</p>
+
+    <fieldset class="baustein">
+      ${bausteinCheck("mitPkw", "🚗 Eigener Pkw", ed && ed.pkwId)}
+      <div data-show="pkw">
+        <div class="zwei">
+          <label>Start<input name="start" value="${esc(v.start || "")}" placeholder="z. B. Berlin"></label>
+          <label>km (einfache Strecke)<input name="km" inputmode="decimal" value="${esc(v.km || "")}"></label>
+        </div>
+        <label class="check"><input type="checkbox" name="hinUndZurueck" ${hz ? "checked" : ""}> Hin und zurück</label>
+        ${gbr ? `
+        <label>Mitfahrerin<select name="mitfahrerin">${opt("", "niemand", v.mitfahrerin || "")}${ges.map((n) => opt(n, n, v.mitfahrerin)).join("")}</select></label>
+        <div class="zwei">
+          <label>Erstattung<select name="status">${opt("offen", "offen (Jahresende)", status)}${opt("bezahlt", "überwiesen", status)}</select></label>
+          <label data-show="zahlungsdatum">Überwiesen am<input type="date" name="zahlungsdatum" value="${esc(v.zahlungsdatum || heute())}"></label>
+        </div>` : ""}
+        <div class="fahrt-rechnung" data-lbl="pkw"></div>
+      </div>
+    </fieldset>
+
+    <fieldset class="baustein">
+      ${bausteinCheck("mitVerpfl", "🍽 Verpflegung", ed && ed.verpflId)}
+      <div data-show="verpfl">
+        <label class="check"><input type="checkbox" name="hotelFrueh" ${v.hotelFrueh ? "checked" : ""}> Hotel mit Frühstück</label>
+        <div data-lbl="verpfl"></div>
+        <p class="klein">Gestellte Mahlzeiten ankreuzen (F = Frühstück, M = Mittag, A = Abend). Ein gebuchtes Hotelfrühstück zählt auch, wenn du es nicht gegessen hast. ${gbr ? "Gebucht als Sonderbetriebsausgabe der reisenden Person. Reist ihr zu zweit, erfasst jede ihre eigene Reise." : "Gebucht als Ausgabe „Verpflegungsmehraufwand“."} An Reisetagen in der Regel keine Homeoffice-Pauschale ansetzen.</p>
+      </div>
+    </fieldset>
+
+    <fieldset class="baustein">
+      <legend>🚆 Tickets und 🏨 Hotel</legend>
+      ${gebucht.map((x) => `<p class="klein">${BAUSTEIN_ICON[reiseBaustein(x)]} ${esc(x.partner)} · ${euro(x.betragCent)} · ${esc(x.belegnr)} (gebucht, im Journal einzeln änderbar)</p>`).join("")}
+      ${(d.belege || []).map((bl, i) => reiseBelegKarte(bl, i, gbr, ges)).join("")}
+      <div class="zwei">
+        <button type="button" class="sekundaer" data-act="reise-beleg" data-typ="ticket">＋ 🚆 Ticket</button>
+        <button type="button" class="sekundaer" data-act="reise-beleg" data-typ="hotel">＋ 🏨 Hotel</button>
+      </div>
+      <p class="klein">Foto oder PDF der Fahrkarte bzw. Hotelrechnung. Bahn, Flug, ÖPNV und Taxi zählen als Ticket.</p>
+    </fieldset>
+
+    <div data-lbl="summe"></div>
     <div class="aktionen">
-      <button type="submit" class="primary big">${neu ? "Fahrt speichern" : "Änderungen speichern"}</button>
+      <button type="submit" class="primary big">${ed ? "Reise speichern" : "Reise speichern"}</button>
     </div>
   </form>`;
 }
 
-function fahrtWerte(form) {
-  const cfg = aktivData().config;
+function reiseBelegKarte(bl, i, gbr, ges) {
+  const ki = bl.ki || {};
+  const vorschau = bl.pdfBlob ? `📄 ${esc(bl.pdfName)}` : bl.pages.length ? `<img class="mini" src="${bl.pages[0].dataUrl}" alt="">` : "";
+  const bv = bl.bezahltVon || "betrieb";
+  return `
+    <div class="reise-beleg">
+      <div class="kopf"><b>${BAUSTEIN_ICON[bl.typ]} ${bl.typ === "hotel" ? "Hotel" : "Ticket"}</b><button type="button" class="link" data-act="reise-beleg-weg" data-i="${i}">Entfernen</button></div>
+      <div class="vorschau">${vorschau}${ki.status === "laeuft" ? ` <span class="spinner"></span> KI liest …` : ki.status === "fehler" ? ` <small>KI: ${esc(ki.info)}</small>` : ""}</div>
+      <div class="zwei">
+        <label>Betrag (€)<input name="b${i}_betrag" inputmode="decimal" value="${esc(bl.betrag || "")}"></label>
+        <label>Datum<input type="date" name="b${i}_datum" value="${esc(bl.datum || "")}"></label>
+      </div>
+      <label>${bl.typ === "hotel" ? "Hotel" : "Anbieter"}<input name="b${i}_partner" value="${esc(bl.partner || "")}" placeholder="${bl.typ === "hotel" ? "z. B. Hotel am Hafen" : "z. B. Deutsche Bahn"}"></label>
+      ${bl.typ === "hotel" ? `<label class="check"><input type="checkbox" name="b${i}_frueh" ${bl.frueh ? "checked" : ""}> Frühstück inklusive</label>` : ""}
+      ${gbr ? `<label>Bezahlt von<select name="b${i}_bezahltVon">${opt("betrieb", "GbR-Konto", bv)}${ges.map((n) => opt(n, `${n} privat`, bv)).join("")}</select></label>
+      <label data-show="b${i}_beh">Behandlung<select name="b${i}_behandlung">${opt("sonderbetriebsausgabe", "Sonderbetriebsausgabe (trägt sie allein)", bl.behandlung || "sonderbetriebsausgabe")}${opt("einlage", "Einlage", bl.behandlung)}${opt("erstattung", "Wird vom GbR-Konto erstattet", bl.behandlung)}</select></label>` : ""}
+    </div>`;
+}
+
+// Formularwerte in den Entwurf übernehmen (vor jedem Neuzeichnen)
+function sichereReiseWerte() {
+  const form = document.getElementById("f");
+  const d = S.draft;
+  if (!d || d.mode !== "reise" || !form || !form.dataset.reise) return;
+  const f = Object.fromEntries(new FormData(form).entries());
+  const mahl = (d.values && d.values.mahl) || {};
+  d.values = { ...f, mahl, mitPkw: f.mitPkw || "", mitVerpfl: f.mitVerpfl || "", hinUndZurueck: f.hinUndZurueck || "", hotelFrueh: f.hotelFrueh || "" };
+  (d.belege || []).forEach((bl, i) => {
+    bl.betrag = f[`b${i}_betrag`] ?? bl.betrag;
+    bl.datum = f[`b${i}_datum`] ?? bl.datum;
+    bl.partner = f[`b${i}_partner`] ?? bl.partner;
+    bl.frueh = !!f[`b${i}_frueh`];
+    if (f[`b${i}_bezahltVon`] !== undefined) bl.bezahltVon = f[`b${i}_bezahltVon`];
+    if (f[`b${i}_behandlung`] !== undefined) bl.behandlung = f[`b${i}_behandlung`];
+  });
+}
+
+function reiseZeiten(form) {
+  const abD = form.abDatum.value;
+  const anD = form.anDatum.value || abD;
+  const ab = abD && form.abZeit.value ? `${abD}T${form.abZeit.value}` : "";
+  const an = anD && form.anZeit.value ? `${anD}T${form.anZeit.value}` : "";
+  return { abD, anD, ab, an };
+}
+
+function pkwWerte(form, cfg) {
   const km = parseFloat(String(form.km.value).replace(",", ".")) || 0;
   const hz = form.hinUndZurueck.checked;
   const kmGesamt = Math.round((hz ? 2 : 1) * km * 10) / 10;
-  const satzCent = fahrtSatz(cfg);
+  const satzCent = cfg.typ === "gbr" ? fahrtSatz(cfg) : KM_PAUSCHALE_CENT;
   return { km, hz, kmGesamt, satzCent, erstattungCent: Math.round(kmGesamt * satzCent), sbaCent: Math.round(kmGesamt * KM_PAUSCHALE_CENT) };
 }
 
-function bindFahrt(form) {
-  const update = () => {
-    const w = fahrtWerte(form);
-    form.querySelector('[data-show="zahlungsdatum"]').style.display = form.status.value === "bezahlt" ? "" : "none";
-    const fahrerin = form.fahrerin.value;
-    form.querySelector('[data-lbl="rechnung"]').innerHTML = w.kmGesamt > 0
-      ? `<table class="uebersicht">
-          <tr><td>${w.hz ? `2 × ${esc(String(w.km).replace(".", ","))} km = ` : ""}${esc(String(w.kmGesamt).replace(".", ","))} km</td><td></td></tr>
-          <tr><td>Erstattung GbR (${satzText(w.satzCent)}/km)</td><td>${euro(w.erstattungCent)}</td></tr>
-          <tr><td>Sonderbetriebsausgabe ${esc(vorname(fahrerin))} (${satzText(KM_PAUSCHALE_CENT)}/km)</td><td>${euro(w.sbaCent)}</td></tr>
-        </table>`
-      : "";
+function bindReise(form, d) {
+  const cfg = aktivData().config;
+  const gbr = cfg.typ === "gbr";
+  d.values = d.values || {};
+  d.values.mahl = d.values.mahl || {};
+  const mahl = d.values.mahl;
+  const hotelFruehSetzen = (an) => {
+    const { ab, an: rueck, abD, anD } = reiseZeiten(form);
+    const tage = verpflegungTage(ab || `${abD}T00:00`, rueck || `${anD}T23:59`);
+    tage.forEach((t, i) => { if (i > 0) (mahl[t.datum] = mahl[t.datum] || {}).f = an; });
   };
-  form.addEventListener("input", update);
-  form.addEventListener("change", update);
+  const update = () => {
+    const show = {
+      pkw: !!(form.mitPkw && (form.mitPkw.type === "hidden" || form.mitPkw.checked)),
+      verpfl: !!(form.mitVerpfl && (form.mitVerpfl.type === "hidden" || form.mitVerpfl.checked)),
+      zahlungsdatum: gbr && form.status && form.status.value === "bezahlt",
+    };
+    (d.belege || []).forEach((_, i) => { show[`b${i}_beh`] = gbr && form[`b${i}_bezahltVon`] && form[`b${i}_bezahltVon`].value !== "betrieb"; });
+    form.querySelectorAll("[data-show]").forEach((el) => (el.style.display = show[el.dataset.show] ? "" : "none"));
+    const person = form.person.value;
+    const zeilen = [];
+    // Pkw
+    const pk = form.querySelector('[data-lbl="pkw"]');
+    if (show.pkw) {
+      const w = pkwWerte(form, cfg);
+      pk.innerHTML = w.kmGesamt > 0 ? `<table class="uebersicht">
+          <tr><td>${w.hz ? `2 × ${esc(kmText(w.km))} km = ` : ""}${esc(kmText(w.kmGesamt))} km</td><td></td></tr>
+          ${gbr ? `<tr><td>Erstattung GbR (${satzText(w.satzCent)}/km)</td><td>${euro(w.erstattungCent)}</td></tr>
+          <tr><td>Sonderbetriebsausgabe ${esc(vorname(person))} (${satzText(KM_PAUSCHALE_CENT)}/km)</td><td>${euro(w.sbaCent)}</td></tr>`
+          : `<tr><td>Fahrtkosten (${satzText(KM_PAUSCHALE_CENT)}/km)</td><td>${euro(w.erstattungCent)}</td></tr>`}
+        </table>` : "";
+      if (w.kmGesamt > 0) zeilen.push([`🚗 Pkw ${kmText(w.kmGesamt)} km${gbr ? " (Erstattung GbR)" : ""}`, w.erstattungCent]);
+    }
+    // Verpflegung
+    const vp = form.querySelector('[data-lbl="verpfl"]');
+    if (show.verpfl) {
+      const { ab, an } = reiseZeiten(form);
+      const tage = verpflegungTage(ab, an, mahl);
+      if (!ab || !an) vp.innerHTML = `<p class="hinweis neutral klein">Bitte Abfahrt und Rückkehr mit Uhrzeit eintragen.</p>`;
+      else if (!tage.length) vp.innerHTML = `<p class="hinweis rotf klein">Die Rückkehr liegt vor der Abfahrt.</p>`;
+      else if (tage.length > 92) vp.innerHTML = `<p class="hinweis rotf klein">Länger als drei Monate am Stück – bitte prüfen.</p>`;
+      else {
+        const summe = tage.reduce((a, t) => a + t.betrag, 0);
+        const typ = (t) => ({ eintaegig: `${kmText(t.stunden)} Std.`, anreise: "Anreise", abreise: "Abreise", zwischen: "voller Tag" })[t.typ];
+        const cb = (t, k) => `<td class="mitte"><input type="checkbox" data-mahl="${t.datum}|${k}" ${t.mahlzeiten[k] ? "checked" : ""} ${t.pauschale ? "" : "disabled"}></td>`;
+        vp.innerHTML = `<table class="uebersicht verpfl">
+            <tr><td></td><th>Pauschale</th><th class="mitte">F</th><th class="mitte">M</th><th class="mitte">A</th><th>Betrag</th></tr>
+            ${tage.map((t) => `<tr><td>${wochentag(t.datum)} ${datumDE(t.datum).slice(0, 6)}<br><small>${typ(t)}</small></td><td>${euro(t.pauschale)}</td>${cb(t, "f")}${cb(t, "m")}${cb(t, "a")}<td>${euro(t.betrag)}</td></tr>`).join("")}
+            <tr class="summe"><td>Summe</td><td></td><td></td><td></td><td></td><td>${euro(summe)}</td></tr>
+          </table>
+          ${tage.length === 1 && !tage[0].pauschale ? `<p class="hinweis neutral klein">Bis 8 Stunden unterwegs: keine Verpflegungspauschale.</p>` : ""}`;
+        if (summe > 0) zeilen.push([`🍽 Verpflegung ${vorname(person)}${gbr ? " (Sonderbetriebsausgabe)" : ""}`, summe]);
+      }
+    }
+    // Tickets und Hotel
+    (d.belege || []).forEach((bl, i) => {
+      const c = parseBetrag(form[`b${i}_betrag`].value);
+      if (c > 0) zeilen.push([`${BAUSTEIN_ICON[bl.typ]} ${form[`b${i}_partner`].value || (bl.typ === "hotel" ? "Hotel" : "Ticket")}`, c]);
+    });
+    form.querySelector('[data-lbl="summe"]').innerHTML = zeilen.length ? `<table class="uebersicht">
+        ${zeilen.map(([l, c]) => `<tr><td>${esc(l)}</td><td>${euro(c)}</td></tr>`).join("")}
+        <tr class="summe"><td>Diese Reise${d.edit ? " (neu oder geändert)" : ""}</td><td>${euro(zeilen.reduce((a, z) => a + z[1], 0))}</td></tr>
+      </table>` : "";
+  };
+  form.addEventListener("change", (ev) => {
+    const t = ev.target;
+    if (t.dataset.mahl) {
+      const [dt, k] = t.dataset.mahl.split("|");
+      (mahl[dt] = mahl[dt] || {})[k] = t.checked;
+    } else if (t.name === "hotelFrueh") {
+      hotelFruehSetzen(t.checked);
+    } else if (/^b\d+_frueh$/.test(t.name) && t.checked && form.hotelFrueh && !form.hotelFrueh.checked) {
+      form.hotelFrueh.checked = true;
+      hotelFruehSetzen(true);
+    }
+    if (["abDatum", "anDatum"].includes(t.name) && form.hotelFrueh && form.hotelFrueh.checked) hotelFruehSetzen(true);
+    if (t.name === "abDatum" && (!form.anDatum.value || form.anDatum.value < form.abDatum.value)) form.anDatum.value = form.abDatum.value;
+    update();
+  });
+  form.addEventListener("input", (ev) => { if (!ev.target.dataset.mahl) update(); });
   update();
 }
 
-function leseFahrt(form) {
+// Ticket/Hotel hinzufügen: Datei wählen oder fotografieren
+const reiseInput = document.createElement("input");
+reiseInput.type = "file";
+reiseInput.accept = "application/pdf,image/*";
+reiseInput.hidden = true;
+document.body.appendChild(reiseInput);
+let reiseTyp = "ticket";
+reiseInput.addEventListener("change", async () => {
+  const f = reiseInput.files[0];
+  reiseInput.value = "";
+  const d = S.draft;
+  if (!f || !d || d.mode !== "reise") return;
+  sichereReiseWerte();
+  const bl = { id: uuid(), typ: reiseTyp, pages: [], pdfBlob: null, pdfName: "", betrag: "", datum: d.values.abDatum || "", partner: "", frueh: false, bezahltVon: "betrieb", behandlung: "sonderbetriebsausgabe", ki: {} };
+  try {
+    if (f.type === "application/pdf" || /\.pdf$/i.test(f.name)) { bl.pdfBlob = f; bl.pdfName = f.name; }
+    else { busy("Bild wird vorbereitet …"); bl.pages.push(await compressImage(f)); busy(null); }
+  } catch (e) { return fehler(e); }
+  d.belege.push(bl);
+  render();
+  reiseBelegKi(d, bl);
+});
+
+async function reiseBelegKi(d, bl) {
+  const key = ls.get("sk_apikey", "");
+  if (!key) return;
+  bl.ki = { status: "laeuft" };
+  sichereReiseWerte(); render();
+  try {
+    const r = await kiAuslesen({ apiKey: key, modell: ls.get("sk_modell", KI_STANDARD), pages: bl.pages, pdfBlob: bl.pdfBlob, config: aktivData().config });
+    if (S.draft !== d) return;
+    sichereReiseWerte();
+    if (typeof r.betrag === "number" && r.betrag > 0 && !bl.betrag) bl.betrag = betragText(Math.round(r.betrag * 100));
+    if (r.partner && !bl.partner) bl.partner = r.partner;
+    if (r.belegdatum) bl.datum = r.belegdatum;
+    bl.ki = { status: "ok" };
+  } catch (e) {
+    if (S.draft !== d) return;
+    sichereReiseWerte();
+    bl.ki = { status: "fehler", info: e.message };
+  }
+  if (S.view === "erfassen") render();
+}
+
+// Verpflegungstage dieser Person schon in einer anderen Reise gebucht? (über alle Betriebe)
+function verpflegungKollision(person, tage, eigeneId) {
+  // Tage mit Anspruch (Pauschale vor Kürzung) – auch wenn gestellte Mahlzeiten den Betrag auf 0 € senken
+  const daten = new Set(tage.filter((t) => t.pauschale > 0).map((t) => t.datum));
+  for (const b of S.betriebe) {
+    const dd = S.data[b.key];
+    if (!dd) continue;
+    for (const x of dd.journal.eintraege) {
+      if (x.storniert || x.id === eigeneId || !x.reise || !x.reise.verpflegung || !gleichePerson(x.reise.person, person)) continue;
+      const t = x.reise.verpflegung.tage.find((y) => y.pauschale > 0 && daten.has(y.datum));
+      if (t) return `Verpflegung für ${datumDE(t.datum)} ist für ${vorname(person)} schon gebucht (${x.belegnr}, ${dd.config.name}). Jeder Tag zählt nur einmal je Person.`;
+    }
+  }
+  return null;
+}
+
+// Dreimonatsfrist: gleiche Person, gleiches Ziel, erste Verpflegung mehr als drei Monate zurück
+function dreimonatsHinweis(person, ziel, abDatum, eigeneId) {
+  const norm = (s) => String(s || "").trim().toLowerCase();
+  const grenze = new Date(Date.parse(abDatum + "T00:00:00Z"));
+  grenze.setUTCMonth(grenze.getUTCMonth() - 3);
+  const g = grenze.toISOString().slice(0, 10);
+  for (const b of S.betriebe) {
+    const dd = S.data[b.key];
+    if (!dd) continue;
+    const frueh = dd.journal.eintraege.find((x) => !x.storniert && x.id !== eigeneId && x.reise && x.reise.verpflegung &&
+      gleichePerson(x.reise.person, person) && norm(x.reise.ziel) === norm(ziel) && x.reise.abDatum <= g && x.reise.abDatum >= `${Number(abDatum.slice(0, 4)) - 1}${abDatum.slice(4)}`);
+    if (frueh) return `${vorname(person)} war schon am ${datumDE(frueh.reise.abDatum)} in ${ziel} (${frueh.belegnr}). Wer länger als drei Monate regelmäßig an derselben Tätigkeitsstätte ist, bekommt dort keine Verpflegungspauschale mehr (Neubeginn nach mindestens vier Wochen Pause).\n\nTrotzdem speichern?`;
+  }
+  return null;
+}
+
+// Liest das Reise-Formular → { basis, neu: [Buchungen], aenderungen: { id: Felder } }
+function leseReise(form, d) {
+  const cfg = aktivData().config;
+  const gbr = cfg.typ === "gbr";
   const f = Object.fromEntries(new FormData(form).entries());
-  const w = fahrtWerte(form);
-  if (!f.belegdatum) throw new Error("Bitte das Datum der Fahrt angeben.");
-  if (!f.start.trim() || !f.ziel.trim()) throw new Error("Bitte Start und Ziel angeben.");
-  if (!f.anlass.trim()) throw new Error("Bitte den betrieblichen Anlass angeben – das gehört zum Nachweis.");
-  if (!(w.km > 0) || w.km > 5000) throw new Error("Bitte die gefahrenen km angeben.");
-  if (!f.fahrerin) throw new Error("Bitte in den Betriebsdaten Gesellschafterinnen eintragen.");
-  if (f.mitfahrerin && f.mitfahrerin === f.fahrerin) throw new Error("Fahrerin und Mitfahrerin sind dieselbe Person.");
-  const bezahlt = f.status === "bezahlt";
-  if (bezahlt && !f.zahlungsdatum) throw new Error("Bitte das Überweisungsdatum angeben.");
-  const fahrt = {
-    start: f.start.trim(), ziel: f.ziel.trim(), anlass: f.anlass.trim(),
-    km: w.km, hinUndZurueck: w.hz, kmGesamt: w.kmGesamt,
-    fahrerin: f.fahrerin, mitfahrerin: f.mitfahrerin || "",
-    satzCent: w.satzCent, sbaSatzCent: KM_PAUSCHALE_CENT, sbaCent: w.sbaCent,
-  };
-  return {
-    art: "ausgabe",
-    belegdatum: f.belegdatum,
-    betragCent: w.erstattungCent,
-    partner: `${f.fahrerin} (eigener Pkw)`,
-    kategorie: "Fahrtkosten eigener Pkw",
-    beschreibung: `${fahrt.start} – ${fahrt.ziel}${fahrt.hinUndZurueck ? " und zurück" : ""}: ${fahrt.anlass}`,
-    rechnungsnr: "",
-    status: bezahlt ? "bezahlt" : "offen",
-    zahlungsdatum: bezahlt ? f.zahlungsdatum : null,
-    bezahltVon: "betrieb",
-    behandlung: null,
-    gesellschafterin: "",
-    entnahmeArt: null,
-    eigenbelegGrund: EIGENBELEG_GRUENDE[0],
-    pauschale: `${String(fahrt.kmGesamt).replace(".", ",")} km × ${satzText(w.satzCent)} Erstattung · SBA ${String(fahrt.kmGesamt).replace(".", ",")} km × ${satzText(KM_PAUSCHALE_CENT)}`,
-    gesamtCent: null,
-    anteilProzent: null,
-    bewAnlass: null, bewTeilnehmende: null, bewOrt: null,
-    fahrt,
-  };
+  const person = (f.person || "").trim();
+  const ziel = (f.ziel || "").trim();
+  const anlass = (f.anlass || "").trim();
+  const { abD, anD, ab, an } = reiseZeiten(form);
+  if (!person) throw new Error(gbr ? "Bitte in den Betriebsdaten Gesellschafterinnen eintragen." : "Bitte die reisende Person angeben.");
+  if (!ziel) throw new Error("Bitte das Ziel angeben.");
+  if (!anlass) throw new Error("Bitte den betrieblichen Anlass angeben – das gehört zum Nachweis.");
+  if (!abD) throw new Error("Bitte das Abfahrtsdatum angeben.");
+  if (anD < abD) throw new Error("Die Rückkehr liegt vor der Abfahrt.");
+  const basis = { id: d.reiseId, person, ziel, anlass, abDatum: abD, abZeit: f.abZeit || "", anDatum: anD, anZeit: f.anZeit || "" };
+  const ed = d.edit || {};
+  const neu = [];
+  const aenderungen = {};
+  const gemeinsam = { gesellschafterin: "", entnahmeArt: null, rechnungsnr: "", gesamtCent: null, anteilProzent: null, bewAnlass: null, bewTeilnehmende: null, bewOrt: null };
+
+  // Pkw
+  if (f.mitPkw) {
+    const w = pkwWerte(form, cfg);
+    const start = (f.start || "").trim();
+    if (!start) throw new Error("Bitte den Startort der Pkw-Fahrt angeben.");
+    if (!(w.km > 0) || w.km > 5000) throw new Error("Bitte die gefahrenen km angeben.");
+    const beschreibung = `${start} – ${ziel}${w.hz ? " und zurück" : ""}: ${anlass}`;
+    let e;
+    if (gbr) {
+      if (f.mitfahrerin && f.mitfahrerin === person) throw new Error("Fahrerin und Mitfahrerin sind dieselbe Person.");
+      const bezahlt = f.status === "bezahlt";
+      if (bezahlt && !f.zahlungsdatum) throw new Error("Bitte das Überweisungsdatum angeben.");
+      e = {
+        ...gemeinsam, art: "ausgabe", belegdatum: abD, betragCent: w.erstattungCent, partner: `${person} (eigener Pkw)`, kategorie: "Fahrtkosten eigener Pkw",
+        beschreibung, status: bezahlt ? "bezahlt" : "offen", zahlungsdatum: bezahlt ? f.zahlungsdatum : null, bezahltVon: "betrieb", behandlung: null,
+        eigenbelegGrund: EIGENBELEG_GRUENDE[0],
+        pauschale: `${kmText(w.kmGesamt)} km × ${satzText(w.satzCent)} Erstattung · SBA ${kmText(w.kmGesamt)} km × ${satzText(KM_PAUSCHALE_CENT)}`,
+        fahrt: { start, ziel, anlass, km: w.km, hinUndZurueck: w.hz, kmGesamt: w.kmGesamt, fahrerin: person, mitfahrerin: f.mitfahrerin || "", satzCent: w.satzCent, sbaSatzCent: KM_PAUSCHALE_CENT, sbaCent: w.sbaCent },
+        reise: { ...basis, baustein: "pkw" },
+      };
+    } else {
+      e = {
+        ...gemeinsam, art: "ausgabe", belegdatum: abD, betragCent: w.erstattungCent, partner: `${person} (eigener Pkw)`, kategorie: "Fahrtkosten eigener Pkw",
+        beschreibung, status: "bezahlt", zahlungsdatum: abD, bezahltVon: null, behandlung: null, eigenbelegGrund: EIGENBELEG_GRUENDE[0],
+        pauschale: `${kmText(w.kmGesamt)} km × ${satzText(KM_PAUSCHALE_CENT)}`,
+        reise: { ...basis, baustein: "pkw", pkw: { start, km: w.km, hinUndZurueck: w.hz, kmGesamt: w.kmGesamt } },
+      };
+    }
+    if (ed.pkwId) aenderungen[ed.pkwId] = e; else neu.push(e);
+  }
+
+  // Verpflegung
+  if (f.mitVerpfl) {
+    if (!ab || !an) throw new Error("Für die Verpflegung bitte Abfahrt und Rückkehr mit Uhrzeit angeben.");
+    const tage = verpflegungTage(ab, an, d.values.mahl || {});
+    if (!tage.length) throw new Error("Die Rückkehr liegt vor der Abfahrt.");
+    if (tage.length > 92) throw new Error("Die Reise ist länger als drei Monate – bitte die Daten prüfen.");
+    const summe = tage.reduce((a, t) => a + t.betrag, 0);
+    if (summe > 0) {
+      const e = {
+        ...gemeinsam, art: "ausgabe", belegdatum: abD, betragCent: summe, partner: `${person} (Verpflegung)`, kategorie: "Verpflegungsmehraufwand",
+        beschreibung: `Verpflegung ${ziel}: ${anlass}`, status: "bezahlt", zahlungsdatum: anD,
+        bezahltVon: gbr ? person : null, behandlung: gbr ? "sonderbetriebsausgabe" : null, eigenbelegGrund: EIGENBELEG_GRUENDE[0],
+        pauschale: `${tage.length} Tag${tage.length === 1 ? "" : "e"} Verpflegungspauschale Inland`,
+        reise: { ...basis, baustein: "verpflegung", verpflegung: { tage, hotelFrueh: !!f.hotelFrueh, gesamtCent: summe } },
+      };
+      if (ed.verpflId) aenderungen[ed.verpflId] = e; else neu.push(e);
+    } else if (ed.verpflId) {
+      throw new Error("Die Verpflegung ergibt jetzt 0 € – bitte die bestehende Verpflegungsbuchung stornieren.");
+    } else if (!f.mitPkw && !(d.belege || []).length) {
+      throw new Error("Bis 8 Stunden unterwegs: keine Verpflegungspauschale – nichts zu buchen.");
+    }
+  }
+
+  // Tickets und Hotel
+  (d.belege || []).forEach((bl, i) => {
+    const c = parseBetrag(f[`b${i}_betrag`]);
+    const partner = (f[`b${i}_partner`] || "").trim();
+    const datum = f[`b${i}_datum`] || abD;
+    const name = bl.typ === "hotel" ? "Hotel" : "Ticket";
+    if (!(c > 0)) throw new Error(`${name}: Bitte den Betrag angeben.`);
+    if (!partner) throw new Error(`${name}: Bitte ${bl.typ === "hotel" ? "das Hotel" : "den Anbieter"} angeben.`);
+    const bv = gbr ? f[`b${i}_bezahltVon`] || "betrieb" : null;
+    neu.push({
+      ...gemeinsam, art: "ausgabe", belegdatum: datum, betragCent: c, partner,
+      kategorie: bl.typ === "hotel" ? "Reisekosten" : "Fahrtkosten Bahn, Flug, ÖPNV",
+      beschreibung: `${bl.typ === "hotel" ? "Übernachtung" : "Fahrkarte"} ${ziel}: ${anlass}`,
+      status: "bezahlt", zahlungsdatum: datum, bezahltVon: bv, behandlung: bv && bv !== "betrieb" ? f[`b${i}_behandlung`] || "sonderbetriebsausgabe" : null,
+      eigenbelegGrund: null, pauschale: null,
+      reise: { ...basis, baustein: bl.typ, ...(bl.typ === "hotel" ? { fruehstueck: !!f[`b${i}_frueh`] } : {}) },
+      _beleg: bl,
+    });
+  });
+  if (!neu.length && !Object.keys(aenderungen).length && !(ed.ids && ed.ids.length)) throw new Error("Bitte mindestens einen Baustein wählen: Pkw, Verpflegung, Ticket oder Hotel.");
+  return { basis, neu, aenderungen };
 }
 
-function pruefeFahrtDoppelt(e, eigeneId) {
-  const dup = aktivData().journal.eintraege.find((x) => x.fahrt && !x.storniert && x.id !== eigeneId &&
-    x.belegdatum === e.belegdatum && x.fahrt.fahrerin === e.fahrt.fahrerin && x.fahrt.kmGesamt === e.fahrt.kmGesamt);
-  return !dup || confirm(`Am ${datumDE(e.belegdatum)} gibt es schon eine Fahrt von ${dup.fahrt.fahrerin} mit ${dup.fahrt.kmGesamt} km (${dup.belegnr}).\n\nTrotzdem speichern?`);
-}
-
-async function speichereFahrt(form) {
+async function speichereReise(form) {
   const b = aktiv();
   const dat = aktivData();
-  let e;
-  try { e = leseFahrt(form); } catch (err) { return toast(err.message, "fehler"); }
-  if (!pruefeFahrtDoppelt(e, null)) return;
-  busy("Speichere Fahrt …");
+  const d = S.draft;
+  let r;
+  try { r = leseReise(form, d); } catch (err) { return toast(err.message, "fehler"); }
+  const ed = d.edit || {};
+  const alle = [...r.neu, ...Object.entries(r.aenderungen).map(([id, e]) => ({ ...e, id }))];
+  // Prüfungen
+  const vp = alle.find((e) => e.reise.baustein === "verpflegung");
+  if (vp) {
+    const k = verpflegungKollision(r.basis.person, vp.reise.verpflegung.tage, ed.verpflId);
+    if (k) return toast(k, "fehler");
+    const h = dreimonatsHinweis(r.basis.person, r.basis.ziel, r.basis.abDatum, ed.verpflId);
+    if (h && !confirm(h)) return;
+  }
+  for (const e of r.neu) {
+    if (e.fahrt) {
+      const dup = dat.journal.eintraege.find((x) => x.fahrt && !x.storniert && !(ed.ids || []).includes(x.id) && x.belegdatum === e.belegdatum && x.fahrt.fahrerin === e.fahrt.fahrerin && x.fahrt.kmGesamt === e.fahrt.kmGesamt);
+      if (dup && !confirm(`Am ${datumDE(e.belegdatum)} gibt es schon eine Fahrt von ${dup.fahrt.fahrerin} mit ${dup.fahrt.kmGesamt} km (${dup.belegnr}).\n\nTrotzdem speichern?`)) return;
+    }
+    if (e._beleg && !pruefeVorSpeichern(e, null)) return;
+  }
+  busy("Speichere Reise …");
   try {
     await ladeBetrieb(b, true);
-    const jahr = e.belegdatum.slice(0, 4);
-    e.id = S.draft.id;
-    e.belegnr = naechsteBelegnr(S.data[b.key].journal, jahr);
-    e.eigenbeleg = true;
-    e.erfasstVon = ichBin();
-    e.erfasstAm = new Date().toISOString();
-    e.storniert = false;
-    e.historie = [];
-    const blob = eigenbelegPdf(e, dat.config, ichBin());
-    busy("Lege Eigenbeleg in OneDrive ab …");
-    const ordner = await G.ensurePath(b.driveId, b.itemId, [BELEGE_FOLDER, jahr]);
-    const item = await G.uploadFile(b.driveId, ordner, dateiname(e, dat.config.kurz), blob);
-    e.datei = { id: item.id, name: item.name, webUrl: item.webUrl, driveId: b.driveId };
-    const nr = await updateJournal(b, (j) => {
-      if (j.eintraege.some((x) => x.belegnr === e.belegnr)) e.belegnr = naechsteBelegnr(j, jahr);
-      j.eintraege.push(e);
-      return e.belegnr;
-    });
+    // 1. bestehende Buchungen ändern (Reisedaten in allen, Beträge in Pkw/Verpflegung)
+    if (ed.ids && ed.ids.length) {
+      const geaendert = await updateJournal(b, (j) => {
+        const out = [];
+        for (const x of j.eintraege) {
+          if (!ed.ids.includes(x.id)) continue;
+          const vorher = JSON.stringify(x);
+          const neuX = r.aenderungen[x.id];
+          if (neuX) Object.assign(x, neuX);
+          else x.reise = { ...(x.reise || {}), ...r.basis, baustein: x.reise ? x.reise.baustein : reiseBaustein(x) };
+          if (x.fahrt) Object.assign(x.fahrt, { ziel: r.basis.ziel, anlass: r.basis.anlass, fahrerin: r.basis.person });
+          if (JSON.stringify(x) !== vorher) {
+            const felder = neuX ? Object.keys(neuX).filter((k) => JSON.stringify(neuX[k] ?? null) !== JSON.stringify(JSON.parse(vorher)[k] ?? null)) : ["reise"];
+            (x.historie = x.historie || []).push({ am: new Date().toISOString(), von: ichBin(), felder: felder.length ? felder : ["reise"] });
+            out.push({ ...x });
+          }
+        }
+        return out;
+      });
+      for (const x of geaendert) if (x.eigenbeleg) await eigenbelegErneuern(b, x.id, x);
+    }
+    // 2. neue Buchungen anlegen
+    const angelegt = [];
+    for (const e of r.neu) {
+      const bl = e._beleg;
+      delete e._beleg;
+      const jahr = e.belegdatum.slice(0, 4);
+      e.id = uuid();
+      e.belegnr = naechsteBelegnr({ eintraege: [...S.data[b.key].journal.eintraege, ...angelegt] }, jahr);
+      e.eigenbeleg = !bl;
+      e.erfasstVon = ichBin();
+      e.erfasstAm = new Date().toISOString();
+      e.storniert = false;
+      e.historie = [];
+      const blob = bl ? bl.pdfBlob || bilderZuPdf(bl.pages) : eigenbelegPdf(e, dat.config, ichBin());
+      busy(`Lade ${BAUSTEIN_ICON[e.reise.baustein]} in OneDrive hoch …`);
+      const ordner = await G.ensurePath(b.driveId, b.itemId, [BELEGE_FOLDER, jahr]);
+      const item = await G.uploadFile(b.driveId, ordner, dateiname(e, dat.config.kurz), blob);
+      e.datei = { id: item.id, name: item.name, webUrl: item.webUrl, driveId: b.driveId };
+      angelegt.push(e);
+    }
+    let nrn = [];
+    if (angelegt.length) {
+      busy("Trage ins Journal ein …");
+      nrn = await updateJournal(b, (j) => angelegt.map((e) => {
+        if (j.eintraege.some((x) => x.belegnr === e.belegnr)) e.belegnr = naechsteBelegnr(j, e.belegdatum.slice(0, 4));
+        j.eintraege.push(e);
+        return e.belegnr;
+      }));
+    }
+    busy("Aktualisiere Excel-Kopie …");
     await excelSpiegeln(b);
     busy(null);
-    toast(`Fahrt gespeichert als ${nr}`);
+    toast(ed.ids ? `Reise gespeichert${nrn.length ? ` (neu: ${nrn.join(", ")})` : ""}` : `Reise gespeichert: ${nrn.join(", ")}`);
     S.draft = null;
     render();
   } catch (err) { fehler(err); }
 }
 
-async function speichereFahrtBearbeitung(form) {
-  const b = aktiv();
-  const id = form.dataset.editId;
-  let neu;
-  try { neu = leseFahrt(form); } catch (err) { return toast(err.message, "fehler"); }
-  if (!pruefeFahrtDoppelt(neu, id)) return;
-  busy("Speichere Änderungen …");
-  try {
-    const res = await updateJournal(b, (j) => {
-      const e = j.eintraege.find((x) => x.id === id);
-      if (!e) throw new Error("Eintrag nicht gefunden.");
-      const felder = Object.keys(neu).filter((k) => JSON.stringify(neu[k] ?? null) !== JSON.stringify(e[k] ?? null));
-      Object.assign(e, neu);
-      if (felder.length) (e.historie = e.historie || []).push({ am: new Date().toISOString(), von: ichBin(), felder });
-      return { ...e };
-    });
-    await eigenbelegErneuern(b, id, res);
-    await excelSpiegeln(b);
-    busy(null);
-    closeModal();
-    toast("Änderungen gespeichert");
-    render();
-  } catch (err) { fehler(err); }
-}
 
 // Eigenbeleg-PDF nach einer Änderung neu erzeugen (Inhalt ersetzen, Datei ggf. umbenennen)
 async function eigenbelegErneuern(b, id, e) {
@@ -1033,8 +1395,8 @@ function renderJournal(main) {
   const liste = alle
     .filter((e) => f.storno || !e.storniert)
     .filter((e) => !f.monat || (e.zahlungsdatum || e.belegdatum).slice(5, 7) === f.monat)
-    .filter((e) => !f.kat || e.kategorie === f.kat)
-    .filter((e) => !q || [e.partner, e.beschreibung, e.kategorie, e.belegnr, e.gesellschafterin, e.rechnungsnr].join(" ").toLowerCase().includes(q))
+    .filter((e) => !f.art || artPasst(e, f.art))
+    .filter((e) => !q || [e.partner, e.beschreibung, e.kategorie, e.belegnr, e.gesellschafterin, e.rechnungsnr, e.reise && e.reise.ziel, e.reise && e.reise.anlass].join(" ").toLowerCase().includes(q))
     .sort((a, b) => (b.zahlungsdatum || b.belegdatum).localeCompare(a.zahlungsdatum || a.belegdatum) || (b.belegnr || "").localeCompare(a.belegnr || ""));
 
   const gueltig = alle.filter((e) => !e.storniert);
@@ -1064,13 +1426,104 @@ function renderJournal(main) {
     <section class="card">
       <div class="filter">
         <select data-flt="monat">${opt("", "Alle Monate", f.monat)}${monate.map((m, i) => opt(m, monNamen[i], f.monat)).join("")}</select>
-        <select data-flt="kat">${opt("", "Alle Kategorien", f.kat)}${[...KATEGORIEN_EINNAHME, ...KATEGORIEN_AUSGABE].map((k) => opt(k, k, f.kat)).join("")}</select>
+        <select data-flt="art">${opt("", "Alle Arten", f.art)}${(cfg.typ === "gbr" ? ARTEN_GBR : ARTEN_PRIVAT).map(([a, l]) => opt(a, l, f.art)).join("")}</select>
         <input data-flt="q" placeholder="Suchen …" value="${esc(f.q)}">
       </div>
       <label class="check klein-check"><input type="checkbox" data-flt-check="storno" ${f.storno ? "checked" : ""}> Stornierte anzeigen${ausgeblendet ? ` (${ausgeblendet} ausgeblendet)` : ""}</label>
-      ${liste.length ? `<ul class="liste">${liste.map(zeile).join("")}</ul>` : `<p class="leer">Keine Einträge.</p>`}
+      ${liste.length ? `<ul class="liste">${journalZeilen(liste)}</ul>` : `<p class="leer">Keine Einträge.</p>`}
       ${istAdmin(cfg) ? `<p class="klein"><button class="link" data-act="loeschprotokoll">Löschprotokoll ansehen</button></p>` : ""}
     </section>`;
+}
+
+// Filter „Art“ (#26)
+const ARTEN_GBR = [
+  ["einnahme", "Einnahme"], ["ausgabe", "Ausgabe"], ["einlage", "Geldeinlage"], ["entnahme", "Entnahme"], ["erstattung", "Erstattung"],
+  ["gewinn", "Gewinnauszahlung"], ["reise", "Reise"], ["privat", "Privat bezahlt"], ["offen", "Offen"],
+];
+const ARTEN_PRIVAT = [["einnahme", "Einnahme"], ["ausgabe", "Ausgabe"], ["reise", "Reise"], ["offen", "Offen"]];
+function artPasst(e, a) {
+  switch (a) {
+    case "einnahme": return e.art === "einnahme";
+    case "ausgabe": return e.art === "ausgabe";
+    case "einlage": return e.art === "einlage";
+    case "entnahme": return e.art === "entnahme" && e.entnahmeArt === "privat";
+    case "erstattung": return e.art === "entnahme" && e.entnahmeArt === "erstattung";
+    case "gewinn": return e.art === "entnahme" && e.entnahmeArt === "gewinn";
+    case "reise": return istReise(e);
+    case "privat": return e.art === "ausgabe" && !!e.bezahltVon && e.bezahltVon !== "betrieb";
+    case "offen": return e.status === "offen";
+    default: return true;
+  }
+}
+
+// Buchungen einer Reise zu einer Zeile zusammenfassen (an der Stelle der neuesten Buchung)
+function journalZeilen(liste) {
+  const gruppen = new Map();
+  const reihen = [];
+  for (const e of liste) {
+    if (!istReise(e)) { reihen.push([e]); continue; }
+    const key = e.reise ? e.reise.id : e.id;
+    if (!gruppen.has(key)) { const g = []; gruppen.set(key, g); reihen.push(g); }
+    gruppen.get(key).push(e);
+  }
+  return reihen.map((g) => (istReise(g[0]) ? reiseZeile(g) : zeile(g[0]))).join("");
+}
+
+function reiseSpanne(b) {
+  const a = datumDE(b.abDatum).slice(0, 6);
+  return !b.anDatum || b.anDatum === b.abDatum ? datumDE(b.abDatum) : `${a}–${datumDE(b.anDatum)}`;
+}
+
+function reiseZeile(g) {
+  const b = reiseBasis(g[0]);
+  const summe = g.reduce((a, e) => a + (e.storniert ? 0 : e.betragCent), 0);
+  const alleStorno = g.every((e) => e.storniert);
+  const badges = [];
+  if (alleStorno) badges.push(`<i class="b rot">storniert</i>`);
+  for (const e of g) {
+    if (e.storniert) continue;
+    const bs = reiseBaustein(e);
+    const km = e.fahrt ? e.fahrt.kmGesamt : e.reise && e.reise.pkw ? e.reise.pkw.kmGesamt : null;
+    badges.push(`<i class="b">${BAUSTEIN_ICON[bs] || ""} ${bs === "pkw" && km ? `${esc(kmText(km))} km` : euro(e.betragCent)}</i>`);
+  }
+  if (g.some((e) => !e.storniert && e.status === "offen")) badges.push(`<i class="b">${g.some((e) => e.fahrt && e.status === "offen") ? "Erstattung offen" : "offen"}</i>`);
+  if (b.person) badges.push(`<i class="b ${personKlasse(b.person)}">${esc(vorname(b.person))}</i>`);
+  const nrn = g.map((e) => e.belegnr).filter(Boolean).sort();
+  return `<li data-act="reise-detail" data-id="${esc(g[0].id)}" class="reise ${alleStorno ? "storno" : ""}">
+    <div class="l1"><span>🧳 Reise ${esc(b.ziel || "")}</span><b><i class="punkt aus"></i>−${euro(summe)}</b></div>
+    <div class="l2"><span>${reiseSpanne(b)} · ${esc(nrn.length > 1 ? `${nrn[0]} bis ${nrn[nrn.length - 1]}` : nrn[0] || "")}${b.anlass ? ` · ${esc(b.anlass)}` : ""}</span>${badges.join("")}</div>
+  </li>`;
+}
+
+function zeigeReise(id) {
+  const d = aktivData();
+  const e = d.journal.eintraege.find((x) => x.id === id);
+  if (!e) return;
+  const g = reiseGruppe(e).sort((a, b) => (a.belegnr || "").localeCompare(b.belegnr || ""));
+  const b = reiseBasis(e);
+  const vp = g.find((x) => !x.storniert && x.reise && x.reise.verpflegung);
+  const reihe = (l, w) => (w ? `<tr><th>${l}</th><td>${w}</td></tr>` : "");
+  const zeit = (dt, z) => `${datumDE(dt)}${z ? `, ${esc(z)} Uhr` : ""}`;
+  const typ = (t) => ({ eintaegig: `${kmText(t.stunden)} Std.`, anreise: "Anreise", abreise: "Abreise", zwischen: "voller Tag" })[t.typ];
+  const gestellt = (m) => [m.f && "F", m.m && "M", m.a && "A"].filter(Boolean).join(" ") || "–";
+  const summe = g.reduce((a, x) => a + (x.storniert ? 0 : x.betragCent), 0);
+  modal(`
+    <div class="kopf"><h2>🧳 Reise ${esc(b.ziel || "")}</h2><button class="link" data-act="modal-zu">Schließen</button></div>
+    <table class="detail">
+      ${reihe("Person", esc(b.person || ""))}
+      ${reihe("Anlass", esc(b.anlass || ""))}
+      ${reihe("Abfahrt", zeit(b.abDatum, b.abZeit))}
+      ${reihe("Rückkehr", zeit(b.anDatum || b.abDatum, b.anZeit))}
+      ${reihe("Gebucht", `${euro(summe)}<br><small>Summe der Buchungen unten</small>`)}
+    </table>
+    ${vp ? `<h3>🍽 Verpflegung</h3><table class="uebersicht">
+      <tr><td></td><th>Pauschale</th><th class="mitte">gestellt</th><th>Betrag</th></tr>
+      ${vp.reise.verpflegung.tage.map((t) => `<tr><td>${wochentag(t.datum)} ${datumDE(t.datum).slice(0, 6)} <small>${typ(t)}</small></td><td>${euro(t.pauschale)}</td><td class="mitte">${gestellt(t.mahlzeiten)}</td><td>${euro(t.betrag)}</td></tr>`).join("")}
+      <tr class="summe"><td>Summe</td><td></td><td></td><td>${euro(vp.betragCent)}</td></tr></table>` : ""}
+    <h3>Buchungen</h3>
+    <ul class="liste">${g.map(zeile).join("")}</ul>
+    <p class="klein">Antippen öffnet die einzelne Buchung (Beleg, Bearbeiten, Stornieren). Für den Kontoabgleich zählen die Buchungen „GbR-Konto“.</p>
+    <div class="aktionen"><button class="sekundaer" data-act="reise-bearbeiten" data-id="${esc(e.id)}">Reise bearbeiten oder ergänzen</button></div>`);
 }
 
 function gbrUebersicht(d, cfg, r) {
@@ -1232,15 +1685,19 @@ function personKlasse(name) {
 
 function zeile(e) {
   const minus = e.art === "ausgabe" || e.art === "entnahme";
+  const bs = reiseBaustein(e);
   const titel = e.fahrt
-    ? `Fahrt ${e.fahrt.start} – ${e.fahrt.ziel}`
+    ? `🚗 Fahrt ${e.fahrt.start} – ${e.fahrt.ziel}`
+    : bs === "pkw" && e.reise.pkw ? `🚗 Fahrt ${e.reise.pkw.start} – ${e.reise.ziel}`
+    : bs === "verpflegung" ? `🍽 Verpflegung ${vorname(e.reise.person)} · ${e.reise.ziel}`
+    : bs ? `${BAUSTEIN_ICON[bs]} ${e.partner}`
     : e.partner || (e.art === "einlage" ? `Einlage ${e.gesellschafterin}`
       : e.aufteilung ? `Privatentnahme ${e.aufteilung.map((x) => vorname(x.name)).join(" / ")}`
       : `${e.entnahmeArt === "gewinn" ? "Gewinnauszahlung" : "Entnahme"} ${e.gesellschafterin}`);
   const badges = [];
   if (e.storniert) badges.push(`<i class="b rot">storniert</i>`);
   if (e.status === "offen") badges.push(`<i class="b">${e.fahrt ? "Erstattung offen" : "offen"}</i>`);
-  if (e.eigenbeleg && !e.fahrt) badges.push(`<i class="b">Eigenbeleg</i>`);
+  if (e.eigenbeleg && !e.fahrt && !bs) badges.push(`<i class="b">Eigenbeleg</i>`);
   if (e.anteilProzent && !(e.gesamtCent && e.gesamtCent !== e.betragCent)) badges.push(`<i class="b">${esc(String(e.anteilProzent).replace(".", ","))} %</i>`);
   const pb = (txt, name) => badges.push(`<i class="b ${personKlasse(name)}">${esc(txt)} ${esc(name)}</i>`);
   if (e.behandlung === "einlage") pb("Einlage", e.bezahltVon);
@@ -1260,7 +1717,7 @@ function zeile(e) {
 function zeigeDetail(id) {
   const e = aktivData().journal.eintraege.find((x) => x.id === id);
   if (!e) return;
-  const artText = e.fahrt ? "Fahrt" : { ausgabe: "Ausgabe", einnahme: "Einnahme", einlage: "Geldeinlage", entnahme: "Entnahme" }[e.art];
+  const artText = e.fahrt ? "Fahrt" : reiseBaustein(e) === "verpflegung" ? "Verpflegung" : { ausgabe: "Ausgabe", einnahme: "Einnahme", einlage: "Geldeinlage", entnahme: "Entnahme" }[e.art];
   const reihe = (l, w) => (w ? `<tr><th>${l}</th><td>${w}</td></tr>` : "");
   const f = e.fahrt;
   const fahrtReihen = f ? [
@@ -1289,12 +1746,16 @@ function zeigeDetail(id) {
       ${reihe("Behandlung", esc({ einlage: "Einlage", erstattung: "wird erstattet", sonderbetriebsausgabe: "Sonderbetriebsausgabe" }[e.behandlung] || ""))}
       ${reihe("Entnahme", esc({ erstattung: "Erstattung", privat: "Privatentnahme", gewinn: "Gewinnauszahlung" }[e.entnahmeArt] || ""))}
       ${reihe("Eigenbeleg", e.eigenbeleg ? esc(e.eigenbelegGrund) + (e.pauschale ? `<br><small>${esc(e.pauschale)}</small>` : "") : "")}`}
+      ${e.reise ? reihe("Reise", `${esc(e.reise.ziel)} · ${esc(e.reise.anlass)}<br><small>${reiseSpanne(e.reise)}${e.reise.abZeit ? `, ${esc(e.reise.abZeit)}–${esc(e.reise.anZeit)} Uhr` : ""} · ${esc(e.reise.person)}</small>`) : ""}
+      ${e.reise && e.reise.verpflegung ? reihe("Tage", e.reise.verpflegung.tage.map((t) => `${datumDE(t.datum)}: ${euro(t.betrag)}${t.kuerzung ? ` <small>(${euro(t.pauschale)} − ${euro(t.kuerzung)})</small>` : ""}`).join("<br>")) : ""}
+      ${e.reise && e.reise.fruehstueck ? reihe("Frühstück", "inklusive") : ""}
       ${reihe("Beleg-Nr.", esc(e.belegnr))}
       ${reihe("Erfasst", `${esc(e.erfasstVon)}, ${new Date(e.erfasstAm).toLocaleString("de-DE")}`)}
       ${e.storniert ? reihe("Storniert", esc(e.stornoGrund || "")) : ""}
       ${(e.historie || []).length ? reihe("Änderungen", e.historie.map((h) => `${new Date(h.am).toLocaleDateString("de-DE")} ${esc(h.von)}: ${esc(h.felder.join(", "))}`).join("<br>")) : ""}
     </table>
     <div class="aktionen">
+      ${istReise(e) ? `<button class="sekundaer" data-act="reise-detail" data-id="${esc(e.id)}">🧳 Ganze Reise</button>` : ""}
       ${e.datei && safeUrl(e.datei.webUrl) ? `<a class="sekundaer btn" href="${esc(safeUrl(e.datei.webUrl))}" target="_blank" rel="noopener">📄 Beleg öffnen</a>` : ""}
       ${!e.storniert ? `<button class="sekundaer" data-act="bearbeiten" data-id="${esc(e.id)}">Bearbeiten</button>
       <button class="gefahr" data-act="storno" data-id="${esc(e.id)}">Stornieren</button>` : ""}
@@ -1305,13 +1766,17 @@ function zeigeDetail(id) {
 function zeigeBearbeiten(id) {
   const e = aktivData().journal.eintraege.find((x) => x.id === id);
   if (!e) return;
+  // Pkw und Verpflegung werden über das Reise-Formular geändert
+  if (["pkw", "verpflegung"].includes(reiseBaustein(e))) {
+    if (S.draft && !confirm("Der angefangene Entwurf unter „Erfassen“ wird verworfen. Fortfahren?")) return;
+    return reiseBearbeiten(id);
+  }
   modal(`
     <div class="kopf"><h2>${esc(e.belegnr)} bearbeiten</h2><button class="link" data-act="modal-zu">Abbrechen</button></div>
-    ${e.fahrt ? formularFahrt(e, { neu: false }) : formular(e, { neu: false, ohne: e.eigenbeleg })}`);
+    ${formular(e, { neu: false, ohne: e.eigenbeleg })}`);
   const form = modalEl.querySelector("form");
   form.dataset.editId = id;
-  if (e.fahrt) bindFahrt(form);
-  else bindFormular(form, e);
+  bindFormular(form, e);
 }
 
 async function speichereBearbeitung(form) {
@@ -1688,7 +2153,7 @@ function zeigeVorlageForm(b, id) {
     <form id="vorlageform">
       <label>Bezeichnung<input name="bezeichnung" value="${esc(v.bezeichnung || "")}" placeholder="z. B. Handy betrieblicher Anteil" required></label>
       <label>Anbieter<input name="partner" value="${esc(v.partner || "")}" placeholder="z. B. Telekom" required></label>
-      <label>Kategorie<select name="kategorie">${KATEGORIEN_AUSGABE.map((k) => opt(k, k, v.kategorie)).join("")}</select></label>
+      <label>Kategorie<select name="kategorie">${KATEGORIEN_AUSGABE.filter((k) => !NUR_REISE_KATEGORIEN.includes(k)).map((k) => opt(k, k, v.kategorie)).join("")}</select></label>
       <div class="zwei">
         <label>Rechnungsbetrag (€)<input name="gesamt" inputmode="decimal" value="${v.gesamtCent ? betragText(v.gesamtCent) : ""}" required></label>
         <label>Betrieblicher Anteil (%)<input name="anteil" inputmode="decimal" value="${esc(v.anteil)}" required></label>
@@ -2120,10 +2585,8 @@ document.addEventListener("submit", (ev) => {
   const form = ev.target;
   if (form.id !== "f") return;
   ev.preventDefault();
-  if (form.fahrtForm) {
-    if (form.dataset.editId) speichereFahrtBearbeitung(form);
-    else speichereFahrt(form);
-  } else if (form.dataset.editId) speichereBearbeitung(form);
+  if (form.dataset.reise) speichereReise(form);
+  else if (form.dataset.editId) speichereBearbeitung(form);
   else speichereNeu(form);
 });
 
@@ -2163,7 +2626,11 @@ document.addEventListener("click", async (ev) => {
       case "foto": camInput.click(); break;
       case "datei": dateiInput.click(); break;
       case "ohne": neuerEntwurf("ohne"); render(); break;
-      case "fahrt": neuerEntwurf("fahrt"); render(); break;
+      case "reise": neueReise(); render(); break;
+      case "reise-beleg": sichereReiseWerte(); reiseTyp = el.dataset.typ; reiseInput.click(); break;
+      case "reise-beleg-weg": sichereReiseWerte(); S.draft.belege.splice(+el.dataset.i, 1); render(); break;
+      case "reise-bearbeiten": reiseBearbeiten(el.dataset.id); break;
+      case "reise-detail": zeigeReise(el.dataset.id); break;
       case "fahrten-abrechnen": zeigeFahrtenAbrechnen(el.dataset.name); break;
       case "fahrtenliste": zeigeFahrtenliste(); break;
       case "loeschen": loesche(el.dataset.id); break;
@@ -2172,7 +2639,7 @@ document.addEventListener("click", async (ev) => {
       case "loeschprotokoll": zeigeLoeschprotokoll(); break;
       case "gewinn-auszahlen": zeigeGewinnAuszahlen(); break;
       case "verwerfen":
-        if (confirm("Diesen Beleg verwerfen?")) { S.draft = null; render(); if (S.queue.length) naechsteDatei(); }
+        if (confirm(S.draft && S.draft.mode === "reise" ? (S.draft.edit ? "Änderungen an der Reise verwerfen?" : "Diese Reise verwerfen?") : "Diesen Beleg verwerfen?")) { S.draft = null; render(); if (S.queue.length) naechsteDatei(); }
         break;
       case "seite-weg": sichereEntwurfsWerte(); S.draft.pages.splice(+el.dataset.i, 1); render(); break;
       case "ki": kiStarten(); break;

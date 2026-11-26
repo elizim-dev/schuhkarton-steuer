@@ -71,7 +71,7 @@ export async function uploadFile(d, pid, name, blob, { overwrite = false } = {})
   let i = 1;
   while (await childByPath(d, pid, nm)) nm = name.replace(/\.pdf$/, ` ${i++}.pdf`);
   const it = mk(nm, pid, { size: blob.size, webUrl: "https://onedrive.example/" + encodeURIComponent(nm) });
-  window.__uploads = (window.__uploads || []).concat([{ name: nm, size: blob.size, type: blob.type }]);
+  window.__uploads = (window.__uploads || []).concat([{ name: nm, size: blob.size, type: blob.type }]); (window.__blobs = window.__blobs || {})[nm] = blob;
   return it;
 }
 export async function replaceContent(d, id, blob) { items[id].size = blob.size; items[id].ersetzt = (items[id].ersetzt || 0) + 1; return items[id]; }

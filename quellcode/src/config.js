@@ -1,5 +1,5 @@
 // Feste Konfiguration der App „Schuhkarton Steuer“
-export const VERSION = "1.5.0";
+export const VERSION = "1.6.0";
 
 export const CLIENT_ID = "e15c462d-09ab-471a-bda0-7b7b06581e86";
 export const REGISTERED_REDIRECT = "https://elizim-dev.github.io/schuhkarton-steuer/";
@@ -32,11 +32,19 @@ export const HOMEOFFICE_MAX_CENT = 126000; // 1.260 € je Jahr und Person (alle
 // Fahrten GbR (Variante 5): Erstattung durch die GbR je km (Standard, in den Betriebsdaten änderbar);
 // die Fahrerin setzt zusätzlich KM_PAUSCHALE_CENT je km als Sonderbetriebsausgabe an
 export const FAHRT_ERSTATTUNG_STANDARD_CENT = 20;
+// Verpflegungsmehraufwand Inland (§ 9 Abs. 4a EStG, Stand 2026)
+export const VERPFL_8H_CENT = 1400; // mehr als 8 Std. (eintägig) sowie An- und Abreisetag
+export const VERPFL_24H_CENT = 2800; // voller Kalendertag
+export const KUERZUNG_FRUEH_CENT = 560; // 20 % von 28 € je gestelltem Frühstück
+export const KUERZUNG_MAHL_CENT = 1120; // 40 % von 28 € je gestelltem Mittag- oder Abendessen
 
 export const KATEGORIEN_EINNAHME = [
   "Betriebseinnahmen (Kleinunternehmer)",
   "Sonstige Einnahmen",
 ];
+
+// Nur über „Reise“ buchbar (Pauschale, kein Restaurantbeleg)
+export const NUR_REISE_KATEGORIEN = ["Verpflegungsmehraufwand"];
 
 export const KATEGORIEN_AUSGABE = [
   "Software, Abos, Lizenzen",
@@ -46,7 +54,9 @@ export const KATEGORIEN_AUSGABE = [
   "Fortbildung",
   "Fachliteratur",
   "Fahrtkosten eigener Pkw",
+  "Fahrtkosten Bahn, Flug, ÖPNV",
   "Reisekosten",
+  "Verpflegungsmehraufwand",
   "Werbung, Website, Hosting",
   "Bewirtung",
   "Versicherungen, Beiträge",
@@ -79,7 +89,8 @@ export const EUER_ZEILEN = [
   { id: "fortb", typ: "ausgabe", zeile: "46", bez: "Fortbildungskosten (ohne Reisekosten)", kat: ["Fortbildung"] },
   { id: "beitr", typ: "ausgabe", zeile: "", bez: "Beiträge, Gebühren, Abgaben und Versicherungen", kat: ["Versicherungen, Beiträge"] },
   { id: "werb", typ: "ausgabe", zeile: "", bez: "Werbekosten", kat: ["Werbung, Website, Hosting"] },
-  { id: "uebrig", typ: "ausgabe", zeile: "", bez: "Übrige unbeschränkt abziehbare Betriebsausgaben", kat: ["Software, Abos, Lizenzen", "Bürobedarf, Porto", "Fachliteratur", "Bankgebühren", "Sonstige Ausgaben"] },
+  { id: "uebrig", typ: "ausgabe", zeile: "", bez: "Übrige unbeschränkt abziehbare Betriebsausgaben", kat: ["Software, Abos, Lizenzen", "Bürobedarf, Porto", "Fachliteratur", "Bankgebühren", "Fahrtkosten Bahn, Flug, ÖPNV", "Sonstige Ausgaben"] },
+  { id: "verpfl", typ: "ausgabe", zeile: "", bez: "Verpflegungsmehraufwendungen", kat: ["Verpflegungsmehraufwand"] },
   { id: "bew", typ: "ausgabe", zeile: "64", bez: "Bewirtungsaufwendungen (abziehbarer Teil 70 %)", kat: ["Bewirtung"], quote: 0.7 },
   { id: "ho", typ: "ausgabe", zeile: "67", bez: "Tagespauschale für die Tätigkeit in der häuslichen Wohnung", kat: ["Homeoffice-Pauschale"] },
   { id: "fahrt", typ: "ausgabe", zeile: "", bez: "Fahrtkosten für nicht zum Betriebsvermögen gehörende Fahrzeuge (Nutzungseinlage)", kat: ["Fahrtkosten eigener Pkw"] },

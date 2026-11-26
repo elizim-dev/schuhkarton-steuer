@@ -1,5 +1,5 @@
 // Berechnungen: Aufteilung GbR, Kapitalkonten, EÜR
-import { EUER_ZEILEN, KATEGORIE_MIGRATION } from "./config.js";
+import { EUER_ZEILEN, KATEGORIE_MIGRATION, VERPFL_8H_CENT, VERPFL_24H_CENT, KUERZUNG_FRUEH_CENT, KUERZUNG_MAHL_CENT } from "./config.js";
 
 export const zahlJahr = (e) => (e.zahlungsdatum || e.belegdatum || "").slice(0, 4);
 const bezahlt = (e) => !e.storniert && e.status === "bezahlt";
@@ -144,4 +144,32 @@ export function faelligePerioden(v, heuteIso) {
     while (m > 12) { m -= 12; y += 1; }
   }
   return out;
+}
+
+// Verpflegungspauschalen Inland je Kalendertag.
+// ab/an: "JJJJ-MM-TTTHH:MM"; mahl: { "JJJJ-MM-TT": { f, m, a } } = gestellte Mahlzeiten
+const plusTage = (iso, n) => new Date(Date.parse(iso + "T00:00:00Z") + n * 864e5).toISOString().slice(0, 10);
+export function verpflegungTage(ab, an, mahl = {}) {
+  const t = (s) => Date.parse(s + ":00Z");
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(ab || "") || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(an || "")) return [];
+  if (!(t(an) > t(ab))) return [];
+  const d0 = ab.slice(0, 10);
+  const d1 = an.slice(0, 10);
+  const tage = [];
+  if (d0 === d1) {
+    const stunden = Math.round(((t(an) - t(ab)) / 36e5) * 100) / 100;
+    tage.push({ datum: d0, typ: "eintaegig", stunden, pauschale: stunden > 8 ? VERPFL_8H_CENT : 0 });
+  } else {
+    for (let d = d0, i = 0; d <= d1 && i < 400; d = plusTage(d, 1), i++) {
+      tage.push({ datum: d, typ: d === d0 ? "anreise" : d === d1 ? "abreise" : "zwischen", pauschale: d === d0 || d === d1 ? VERPFL_8H_CENT : VERPFL_24H_CENT });
+    }
+  }
+  for (const x of tage) {
+    const m = mahl[x.datum] || {};
+    x.mahlzeiten = { f: !!m.f, m: !!m.m, a: !!m.a };
+    const k = (m.f ? KUERZUNG_FRUEH_CENT : 0) + (m.m ? KUERZUNG_MAHL_CENT : 0) + (m.a ? KUERZUNG_MAHL_CENT : 0);
+    x.kuerzung = Math.min(k, x.pauschale);
+    x.betrag = x.pauschale - x.kuerzung;
+  }
+  return tage;
 }
