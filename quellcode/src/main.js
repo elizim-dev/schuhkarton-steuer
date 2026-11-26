@@ -780,7 +780,12 @@ const satzText = (c) => (c / 100).toLocaleString("de-DE", { minimumFractionDigit
 // erscheinen im Journal als eine Zeile.
 // ---------------------------------------------------------------------------
 const privatPerson = (cfg) => (cfg && cfg.inhaber) || (S.account && S.account.name) || ichBin();
-const BAUSTEIN_ICON = { pkw: "🚗", ticket: "🚆", hotel: "🏨", verpflegung: "🍽" };
+const BAUSTEIN_ICON = { pkw: "🚗", ticket: "🚆", hotel: "🏨", neben: "🅿️", verpflegung: "🍽" };
+const BELEG_TYP = {
+  ticket: { name: "Ticket", partner: "Anbieter", bsp: "z. B. Deutsche Bahn", kategorie: "Fahrtkosten Bahn, Flug, ÖPNV", text: "Fahrkarte", fehlt: "den Anbieter" },
+  hotel: { name: "Hotel", partner: "Hotel", bsp: "z. B. Hotel am Hafen", kategorie: "Reisekosten", text: "Übernachtung", fehlt: "das Hotel" },
+  neben: { name: "Nebenkosten", partner: "Wofür / bei wem", bsp: "z. B. Parkhaus Hauptbahnhof", kategorie: "Reisekosten", text: "Reisenebenkosten", fehlt: "wofür bzw. bei wem" },
+};
 const reiseBaustein = (e) => (e.reise && e.reise.baustein) || (e.fahrt ? "pkw" : null);
 const istReise = (e) => !!(e.reise || e.fahrt);
 const kmText = (n) => String(n).replace(".", ",");
@@ -845,7 +850,7 @@ function formularReise(d) {
   const person = v.person || (gbr ? meinePerson(cfg) : privatPerson(cfg));
   const hz = v.hinUndZurueck === undefined ? true : !!v.hinUndZurueck;
   const status = v.status || "offen";
-  const gebucht = ed ? aktivData().journal.eintraege.filter((x) => ed.ids.includes(x.id) && ["ticket", "hotel"].includes(reiseBaustein(x))) : [];
+  const gebucht = ed ? aktivData().journal.eintraege.filter((x) => ed.ids.includes(x.id) && ["ticket", "hotel", "neben"].includes(reiseBaustein(x))) : [];
   const bausteinCheck = (name, label, vorhanden) => vorhanden
     ? `<label class="check baustein"><input type="checkbox" checked disabled> ${label} <small>(gebucht)</small></label><input type="hidden" name="${name}" value="on">`
     : `<label class="check baustein"><input type="checkbox" name="${name}" ${v[name] ? "checked" : ""}> ${label}</label>`;
@@ -892,14 +897,15 @@ function formularReise(d) {
     </fieldset>
 
     <fieldset class="baustein">
-      <legend>🚆 Tickets und 🏨 Hotel</legend>
+      <legend>🚆 Tickets, 🏨 Hotel, 🅿️ Nebenkosten</legend>
       ${gebucht.map((x) => `<p class="klein">${BAUSTEIN_ICON[reiseBaustein(x)]} ${esc(x.partner)} · ${euro(x.betragCent)} · ${esc(x.belegnr)} (gebucht, im Journal einzeln änderbar)</p>`).join("")}
       ${(d.belege || []).map((bl, i) => reiseBelegKarte(bl, i, gbr, ges)).join("")}
       <div class="zwei">
         <button type="button" class="sekundaer" data-act="reise-beleg" data-typ="ticket">＋ 🚆 Ticket</button>
         <button type="button" class="sekundaer" data-act="reise-beleg" data-typ="hotel">＋ 🏨 Hotel</button>
       </div>
-      <p class="klein">Foto oder PDF der Fahrkarte bzw. Hotelrechnung. Bahn, Flug, ÖPNV und Taxi zählen als Ticket.</p>
+      <button type="button" class="sekundaer" data-act="reise-beleg" data-typ="neben">＋ 🅿️ Nebenkosten</button>
+      <p class="klein">Foto oder PDF des Belegs. Ticket = Bahn, Flug, ÖPNV, Taxi. Nebenkosten = Parken, Gepäckaufbewahrung u. Ä. (Reisenebenkosten, zusätzlich zur km-Pauschale absetzbar).</p>
     </fieldset>
 
     <div data-lbl="summe"></div>
@@ -915,13 +921,13 @@ function reiseBelegKarte(bl, i, gbr, ges) {
   const bv = bl.bezahltVon || "betrieb";
   return `
     <div class="reise-beleg">
-      <div class="kopf"><b>${BAUSTEIN_ICON[bl.typ]} ${bl.typ === "hotel" ? "Hotel" : "Ticket"}</b><button type="button" class="link" data-act="reise-beleg-weg" data-i="${i}">Entfernen</button></div>
+      <div class="kopf"><b>${BAUSTEIN_ICON[bl.typ]} ${BELEG_TYP[bl.typ].name}</b><button type="button" class="link" data-act="reise-beleg-weg" data-i="${i}">Entfernen</button></div>
       <div class="vorschau">${vorschau}${ki.status === "laeuft" ? ` <span class="spinner"></span> KI liest …` : ki.status === "fehler" ? ` <small>KI: ${esc(ki.info)}</small>` : ""}</div>
       <div class="zwei">
         <label>Betrag (€)<input name="b${i}_betrag" inputmode="decimal" value="${esc(bl.betrag || "")}"></label>
         <label>Datum<input type="date" name="b${i}_datum" value="${esc(bl.datum || "")}"></label>
       </div>
-      <label>${bl.typ === "hotel" ? "Hotel" : "Anbieter"}<input name="b${i}_partner" value="${esc(bl.partner || "")}" placeholder="${bl.typ === "hotel" ? "z. B. Hotel am Hafen" : "z. B. Deutsche Bahn"}"></label>
+      <label>${BELEG_TYP[bl.typ].partner}<input name="b${i}_partner" value="${esc(bl.partner || "")}" placeholder="${BELEG_TYP[bl.typ].bsp}"></label>
       ${bl.typ === "hotel" ? `<label class="check"><input type="checkbox" name="b${i}_frueh" ${bl.frueh ? "checked" : ""}> Frühstück inklusive</label>` : ""}
       ${gbr ? `<label>Bezahlt von<select name="b${i}_bezahltVon">${opt("betrieb", "GbR-Konto", bv)}${ges.map((n) => opt(n, `${n} privat`, bv)).join("")}</select></label>
       <label data-show="b${i}_beh">Behandlung<select name="b${i}_behandlung">${opt("sonderbetriebsausgabe", "Sonderbetriebsausgabe (trägt sie allein)", bl.behandlung || "sonderbetriebsausgabe")}${opt("einlage", "Einlage", bl.behandlung)}${opt("erstattung", "Wird vom GbR-Konto erstattet", bl.behandlung)}</select></label>` : ""}
@@ -1019,7 +1025,7 @@ function bindReise(form, d) {
     // Tickets und Hotel
     (d.belege || []).forEach((bl, i) => {
       const c = parseBetrag(form[`b${i}_betrag`].value);
-      if (c > 0) zeilen.push([`${BAUSTEIN_ICON[bl.typ]} ${form[`b${i}_partner`].value || (bl.typ === "hotel" ? "Hotel" : "Ticket")}`, c]);
+      if (c > 0) zeilen.push([`${BAUSTEIN_ICON[bl.typ]} ${form[`b${i}_partner`].value || BELEG_TYP[bl.typ].name}`, c]);
     });
     form.querySelector('[data-lbl="summe"]').innerHTML = zeilen.length ? `<table class="uebersicht">
         ${zeilen.map(([l, c]) => `<tr><td>${esc(l)}</td><td>${euro(c)}</td></tr>`).join("")}
@@ -1200,14 +1206,14 @@ function leseReise(form, d) {
     const c = parseBetrag(f[`b${i}_betrag`]);
     const partner = (f[`b${i}_partner`] || "").trim();
     const datum = f[`b${i}_datum`] || abD;
-    const name = bl.typ === "hotel" ? "Hotel" : "Ticket";
+    const name = BELEG_TYP[bl.typ].name;
     if (!(c > 0)) throw new Error(`${name}: Bitte den Betrag angeben.`);
-    if (!partner) throw new Error(`${name}: Bitte ${bl.typ === "hotel" ? "das Hotel" : "den Anbieter"} angeben.`);
+    if (!partner) throw new Error(`${name}: Bitte ${BELEG_TYP[bl.typ].fehlt} angeben.`);
     const bv = gbr ? f[`b${i}_bezahltVon`] || "betrieb" : null;
     neu.push({
       ...gemeinsam, art: "ausgabe", belegdatum: datum, betragCent: c, partner,
-      kategorie: bl.typ === "hotel" ? "Reisekosten" : "Fahrtkosten Bahn, Flug, ÖPNV",
-      beschreibung: `${bl.typ === "hotel" ? "Übernachtung" : "Fahrkarte"} ${ziel}: ${anlass}`,
+      kategorie: BELEG_TYP[bl.typ].kategorie,
+      beschreibung: `${BELEG_TYP[bl.typ].text} ${ziel}: ${anlass}`,
       status: "bezahlt", zahlungsdatum: datum, bezahltVon: bv, behandlung: bv && bv !== "betrieb" ? f[`b${i}_behandlung`] || "sonderbetriebsausgabe" : null,
       eigenbelegGrund: null, pauschale: null,
       reise: { ...basis, baustein: bl.typ, ...(bl.typ === "hotel" ? { fruehstueck: !!f[`b${i}_frueh`] } : {}) },

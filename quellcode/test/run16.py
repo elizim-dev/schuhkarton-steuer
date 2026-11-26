@@ -12,7 +12,7 @@ shutil.copy(os.path.join(ROOT, "test", "mock-graph.js"), os.path.join(T, "src", 
 subprocess.run(["npx", "esbuild", os.path.join(T, "src", "main.js"), "--bundle", "--format=iife",
                 "--outfile=" + os.path.join(T, "app.js"), "--log-level=warning"], check=True, cwd=ROOT)
 with open(os.path.join(T, "index.html")) as fh:
-    html = fh.read().replace("app.js?v=1.6.0", "app.js")
+    html = fh.read().replace("app.js?v=1.7.0", "app.js")
 assert "Content-Security-Policy" in html
 open(os.path.join(T, "index.html"), "w").write(html)
 
@@ -86,6 +86,9 @@ with sync_playwright() as p:
         # Hotel per Bild, privat von Janina bezahlt
         with page.expect_file_chooser() as fc: page.click("button[data-typ=hotel]")
         fc.value.set_files(bon_path); page.wait_for_timeout(1500)
+        with page.expect_file_chooser() as fc: page.click("button[data-typ=neben]")
+        fc.value.set_files(bon_path); page.wait_for_timeout(1500)
+        page.fill("input[name=b2_betrag]", "12"); page.fill("input[name=b2_partner]", "Parkhaus Hbf")
         page.fill("input[name=b1_betrag]", "120"); page.fill("input[name=b1_partner]", "Hotel am Hafen"); page.check("input[name=b1_frueh]")
         page.select_option("select[name=b1_bezahltVon]", "Elizabeth Zimmermann"); page.wait_for_timeout(200)
         out["werte_nach_ki"] = page.evaluate("() => { const f=document.getElementById('f'); return [f.ziel.value, f.km.value, f.b0_betrag.value, f.b0_partner.value, f.b1_betrag.value, getComputedStyle(f.querySelector('[data-show=b1_beh]')).display]; }")
